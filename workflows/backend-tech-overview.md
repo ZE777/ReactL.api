@@ -1,0 +1,428 @@
+# ReactL.api 後端技術總覽
+
+> 最後更新：2026-06-02
+> 專案：ReactL Prompt Studio（後台 API）
+> 框架：ASP.NET Core 8.0 / .NET 8
+
+---
+
+## 目錄
+
+1. [技術棧一覽](#1-技術棧一覽)
+2. [專案架構](#2-專案架構)
+3. [認證與授權](#3-認證與授權)
+4. [資料庫設計](#4-資料庫設計)
+5. [統一回應格式與錯誤處理](#5-統一回應格式與錯誤處理)
+6. [AI 多提供商整合](#6-ai-多提供商整合)
+7. [資料加密](#7-資料加密)
+8. [DTO 與 Entity 設計規範](#8-dto-與-entity-設計規範)
+9. [日誌與監控](#9-日誌與監控)
+10. [CORS 設定](#10-cors-設定)
+11. [敏感資訊管理](#11-敏感資訊管理)
+
+---
+
+## 1. 技術棧一覽
+
+| 層級 | 技術 | 說明 |
+|------|------|------|
+| 語言 | C# 12（.NET 8） | Nullable reference types、Implicit using |
+| Web 框架 | ASP.NET Core 8 | Controllers + Middleware 架構 |
+| ORM | Entity Framework Core 8 | Code First + Fluent API |
+| 資料庫 | SQL Server | LocalDB（開發）/ SQL Server（生產）|
+| 認證 | JWT Bearer | HMAC-SHA256、ClockSkew 1 分鐘 |
+| 密碼 | BCrypt.Net-Next 4 | 雙向驗證，不可逆雜湊 |
+| 加密 | AES-256-CBC | Bot Token / Channel Secret 儲存 |
+| 日誌 | Serilog | Console + 每日滾動檔案（30 天保留）|
+| API 文件 | Swagger / OpenAPI 3 | XML 文件 + JWT 登入框 |
+| AI 整合 | OpenAI-Compatible API | 多提供商、SSE 串流 |
+| 健康檢查 | EF Core HealthCheck | GET /health |
+
+---
+
+## 2. 專案架構
+
+採用 **Controller → Service → DbContext** 三層架構，無獨立 Repository 層。
+
+```
+Controllers/          路由入口，只做參數驗證與回應包裝
+├── Ai/
+├── Auth/
+├── Conversations/
+├── Personas/
+├── BotBindings/
+├── PromptTemplates/
+├── Users/
+└── Monitor/
+
+Services/             業務邏輯，直接注入 AppDbContext
+├── Auth/
+├── AI/
+├── Personas/
+├── Conversations/
+├── BotBindings/
+├── PromptTemplates/
+├── Users/
+└── Monitor/
+
+Data/
+├── AppDbContext.cs
+└── AppDbContextFactory.cs   (EF CLI 用，繞過 Host 啟動)
+
+Models/               Entity，對應資料庫資料表
+├── Base/             BaseEntity / AuditableEntity / SoftDeletableEntity
+├── Auth/
+├── Personas/
+├── Conversations/
+├── BotBindings/
+├── PromptTemplates/
+├── External/
+└── Stats/
+
+DTOs/                 請求 / 回應物件，不暴露 Entity 結構
+├── Common/           ApiResponse<T>、PagedResponse<T>
+├── Auth/
+├── Ai/
+├── Personas/
+├── Conversations/
+├── BotBindings/
+├── PromptTemplates/
+├── Users/
+└── Monitor/
+
+Middleware/
+└── ExceptionMiddleware.cs   全域例外攔截 → ProblemDetails
+
+Common/
+├── Constants/        MessageRole、Platform、TokenSource
+├── Exceptions/       AppException 體系
+├── Extensions/       ClaimsPrincipalExtensions
+├── Helpers/          AesEncryptionHelper
+└── Settings/         強型別設定注入
+```
+
+**API 路由規範**：`/api/v1/{resource}`
+
+**DI 生命週期**：
+- Service：`Scoped`（每次請求）
+- `AesEncryptionHelper`：`Singleton`（Key/IV 只載入一次）
+
+---
+
+## 3. 認證與授權
+
+### JWT 設定（`Common/Settings/JwtSettings.cs`）
+
+```csharp
+public class JwtSettings {
+    public string Issuer { get; set; }
+    public string Audience { get; set; }
+    public int ExpirationMinutes { get; set; }  // 預設 60 分鐘
+    public string SecretKey { get; set; }       // HMAC-256，256 bit 以上
+}
+```
+
+**Token 驗證參數**：
+- ValidateIssuer / Audience / Lifetime / IssuerSigningKey：全部 true
+- ClockSkew：1 分鐘（防止伺服器時間偏差）
+
+### 認證流程（`Services/Auth/AuthService.cs`）
+
+**登入**：
+1. Email 不分大小寫查詢（防止帳號列舉繞過）
+2. `BCrypt.Verify` 驗證密碼
+3. 檢查 `IsActive` 狀態
+4. 回傳 JWT，記錄 `LastLoginAt`
+5. 統一錯誤訊息：「帳號或密碼錯誤」（防帳號列舉攻擊）
+
+**ClaimsPrincipal 擴充**（`Common/Extensions/ClaimsPrincipalExtensions.cs`）：
+- `GetUserId()` → Guid
+- `GetEmail()` → string
+- `GetRole()` → string
+- `IsAdmin()` → bool
+
+---
+
+## 4. 資料庫設計
+
+### Entity 基底類別（`Models/Base/`）
+
+| 類別 | 欄位 | 用途 |
+|------|------|------|
+| `BaseEntity` | Id（Guid）、CreatedAt | 唯讀紀錄（快照、訊息）|
+| `AuditableEntity` | + UpdatedAt | 可修改資源（使用者）|
+| `SoftDeletableEntity` | + IsDeleted、DeletedAt | 可軟刪除資源（角色、對話、Bot）|
+
+- `Id` 由應用層產生（`Guid.NewGuid()`），非資料庫自增
+- `CreatedAt` / `UpdatedAt` 由 `SaveChangesAsync` 覆寫自動填入（UTC）
+
+### Fluent API 重要設定（`Data/AppDbContext.cs`）
+
+**軟刪除全域篩選**：
+```csharp
+HasQueryFilter(p => !p.IsDeleted)  // 查詢自動排除已刪除資料
+```
+套用對象：Persona、PromptTemplate、BotBinding、Conversation
+
+**索引設計**：
+- `Users.Email`：唯一索引
+- `PersonaVersions (PersonaId, Version)`：複合唯一
+- `Conversations.ShareSlug`：過濾唯一索引（IS NOT NULL）
+- `ExternalMessages (Platform, CreatedAt)`：複合索引（加速查詢）
+- `TokenUsageStats (UserId, Date, ModelType, Source)`：複合唯一（UPSERT 用）
+
+**外鍵行為**：
+- `SetNull`：刪除 User / Persona 時，相關關聯設 NULL（保留資料）
+- `Cascade`：刪除 Conversation 時，級聯刪除所有 Message
+
+### 資料表一覽
+
+| 資料表 | 基底 | 說明 |
+|--------|------|------|
+| Users | AuditableEntity | 使用者帳號，BCrypt 密碼 |
+| Personas | SoftDeletableEntity | AI 角色，支援版本快照 |
+| PersonaVersions | BaseEntity | 唯讀版本快照，(PersonaId, Version) 唯一 |
+| Conversations | SoftDeletableEntity | 對話，支援置頂與公開分享 |
+| Messages | BaseEntity | 訊息，Cascade 刪除 |
+| BotBindings | SoftDeletableEntity | LINE / Discord Bot 綁定，Token AES 加密 |
+| PromptTemplates | SoftDeletableEntity | Prompt 模板庫 |
+| ExternalMessages | BaseEntity | LINE / Discord 外部訊息監控紀錄 |
+| TokenUsageStats | BaseEntity | Token 用量每日彙總統計 |
+
+---
+
+## 5. 統一回應格式與錯誤處理
+
+### 成功回應（`DTOs/Common/ApiResponse.cs`）
+
+```csharp
+public class ApiResponse<T> {
+    public bool Success { get; init; }
+    public T? Data { get; init; }
+    public string? Message { get; init; }
+
+    public static ApiResponse<T> Ok(T data) => ...
+    public static ApiResponse<T> Ok(T data, string message) => ...
+    public static ApiResponse<T> Fail(string message) => ...
+}
+```
+
+### 分頁回應（`DTOs/Common/PagedResponse.cs`）
+
+```csharp
+public class PagedResponse<T> {
+    public List<T> Items { get; init; }
+    public int TotalCount { get; init; }
+    public int Page { get; init; }
+    public int PageSize { get; init; }
+    public int TotalPages => (int)Math.Ceiling((double)TotalCount / PageSize);
+    public bool HasNextPage => Page < TotalPages;
+    public bool HasPreviousPage => Page > 1;
+}
+```
+
+### 例外類別體系（`Common/Exceptions/`）
+
+```
+AppException（基底，帶 statusCode / errorCode / details）
+├── ValidationException   → 422 VALIDATION_FAILED（附帶欄位錯誤字典）
+├── NotFoundException     → 404 {RESOURCE}_NOT_FOUND
+├── UnauthorizedException → 401 UNAUTHORIZED
+├── ConflictException     → 409 CONFLICT
+└── ForbiddenException    → 403 FORBIDDEN
+```
+
+### 全域例外中介層（`Middleware/ExceptionMiddleware.cs`）
+
+攔截所有未處理例外，回傳 **RFC 7807 ProblemDetails** 格式：
+
+```json
+{
+  "status": 404,
+  "title": "Conversation 不存在",
+  "detail": "Conversation '...' 不存在",
+  "instance": "/api/v1/conversations/123",
+  "errorCode": "CONVERSATION_NOT_FOUND",
+  "traceId": "0HN1GDFRHJK01:00000001"
+}
+```
+
+**例外對應規則**：
+
+| 例外 | Status | ErrorCode | LogLevel |
+|------|--------|-----------|----------|
+| AppException 子類 | 依子類 | 機器可讀代碼 | Warning |
+| DbUpdateConcurrencyException | 409 | CONCURRENCY_CONFLICT | Warning |
+| DbUpdateException (UNIQUE) | 409 | DUPLICATE_ENTRY | Warning |
+| DbUpdateException (FK) | 400 | FOREIGN_KEY_VIOLATION | Warning |
+| OperationCanceledException | 499 | REQUEST_CANCELLED | Information |
+| HttpRequestException | 502 | UPSTREAM_ERROR | Error |
+| TaskCanceledException | 504 | UPSTREAM_TIMEOUT | Error |
+| JsonException | 400 | INVALID_JSON | Information |
+| 其他 | 500 | INTERNAL_ERROR | Error |
+
+**前端 Axios 攔截器分工**（對應 `src/lib/api.ts`）：
+- 元件層處理：400 / 404 / 409 / 422（行內錯誤）
+- 攔截器全域 Toast：401 / 403 / 429 / 5xx / 網路錯誤
+
+---
+
+## 6. AI 多提供商整合
+
+### 服務介面（`Services/AI/IAiService.cs`）
+
+```csharp
+public interface IAiService {
+    // SSE 串流對話（寫入 DB）
+    IAsyncEnumerable<ChatStreamChunk> ChatStreamAsync(
+        ChatRequest request, Guid userId, CancellationToken cancellationToken);
+
+    // 非串流單次呼叫（Prompt 強化用）
+    Task<string> CompleteAsync(
+        string systemPrompt, string userPrompt, CancellationToken cancellationToken = default);
+}
+```
+
+### 已支援提供商（`appsettings.json`）
+
+| 提供商 | 代號 | 主要模型 | SupportsStreamUsage |
+|--------|------|---------|-------------------|
+| Groq | `groq` | Llama 3.3 70B、Llama 3.1 8B、Qwen3 32B | ✓ |
+| Mistral | `mistral` | Mistral Small/Large、Open-Mistral-7B | ✗ |
+| Cerebras | `cerebras` | GPT OSS 120B、ZAI GLM 4.7 | ✗ |
+| SambaNova | `sambanova` | Llama 3.3 70B、DeepSeek V3.1 | ✗ |
+
+模型格式：`{providerId}:{modelId}`，例如 `groq:llama-3.3-70b-versatile`
+
+### SSE 串流實作重點（`Services/AI/OpenAiService.cs`）
+
+- 使用 `IAsyncEnumerable<ChatStreamChunk>` 異步迭代器
+- 支援 `CancellationToken`（前端斷線即停止，避免浪費 API 費用）
+- 邊串流邊累積完整回應，完成後寫入 DB
+- `IHttpClientFactory` 命名 Client（`ai:{providerId}`），避免 Socket 耗盡
+- `SupportsStreamUsage` 旗標：部分提供商支援 `stream_options.include_usage`
+
+### Prompt 強化功能（`Services/Personas/PersonaService.cs`）
+
+```csharp
+public async Task<EnhancePromptResponse> EnhancePromptAsync(EnhancePromptRequest request)
+```
+
+- 呼叫 `IAiService.CompleteAsync`（非串流）
+- 有 `Instruction` 時以指定方向強化，無則通用優化
+- 回傳強化結果供使用者預覽，**不自動存入 DB**
+- 5xx 錯誤由全域攔截器處理，避免前端雙重 Toast
+
+### AiController SSE 端點（`Controllers/Ai/AiController.cs`）
+
+```csharp
+[HttpPost("chat")]
+// Response.ContentType = "text/event-stream; charset=utf-8"
+// 逐行回傳 JSON chunk：{ type, content, usage }
+// chunk type: delta / done / error / rate_limit
+
+[HttpGet("providers")]
+// 回傳 { id, displayName, isConfigured, models[] }
+// isConfigured = ProviderKeys 中有對應 Key
+```
+
+---
+
+## 7. 資料加密
+
+### AES-256-CBC（`Common/Helpers/AesEncryptionHelper.cs`）
+
+```csharp
+public class AesEncryptionHelper {
+    public string Encrypt(string plainText)   // 加密
+    public string Decrypt(string cipherText)  // 解密
+}
+```
+
+**設定**（`Common/Settings/EncryptionSettings.cs`）：
+- `Key`：32 bytes Base64（AES-256）
+- `Iv`：16 bytes Base64
+
+**應用場景**：
+- `BotBinding.BotTokenEncrypted`：LINE / Discord Bot Token
+- `BotBinding.ChannelSecretEncrypted`：LINE Channel Secret
+- 前端顯示只回傳後 4 碼（`TokenLastFour`），不需解密
+
+**注入**：`Singleton`，Key/IV 只載入一次
+
+---
+
+## 8. DTO 與 Entity 設計規範
+
+### DTO 命名規則
+
+| 用途 | 命名 |
+|------|------|
+| 列表摘要 | `{Entity}ListItem` |
+| 單筆詳情 | `{Entity}DetailResponse` |
+| 建立請求 | `Create{Entity}Request` |
+| 更新請求 | `Update{Entity}Request` |
+| 版本相關 | `{Entity}VersionItem` / `{Entity}VersionDetailResponse` |
+
+### 常數定義（`Common/Constants/`）
+
+```csharp
+MessageRole    // user / assistant / system
+Platform       // line / discord / web
+TokenSource    // admin / web / line / discord
+```
+
+---
+
+## 9. 日誌與監控
+
+### Serilog 設定
+
+```csharp
+.WriteTo.Console()
+.WriteTo.File("logs/log-.txt",
+    rollingInterval: RollingInterval.Day,
+    retainedFileCountLimit: 30)
+```
+
+請求日誌格式：`HTTP {Method} {Path} => {StatusCode} ({Elapsed} ms)`
+
+ExceptionMiddleware 分級記錄：預期例外 Warning，未知例外 Error
+
+### 健康檢查
+
+```
+GET /health  →  檢查 API 服務與資料庫連線狀態
+```
+
+---
+
+## 10. CORS 設定
+
+允許來源（開發環境）：
+- `http://localhost:5173`（Vite 後台）
+- `http://localhost:3000`（Next.js 前台）
+
+中介層順序：`UseCors` 必須在 `UseAuthentication` 之前
+
+---
+
+## 11. 敏感資訊管理
+
+| 層級 | 內容 |
+|------|------|
+| `appsettings.json` | 非敏感設定（CORS、AI 提供商清單、AppName）|
+| `appsettings.Development.json` | 開發用 API Keys（已加入 .gitignore）|
+| User Secrets | JwtSettings:SecretKey、AI ProviderKeys、EncryptionSettings |
+| 環境變數 | 生產部署（IIS 應用程式池 / Docker ENV）|
+
+---
+
+## 維護說明
+
+每次新增以下內容時，請同步更新此文件：
+- 新增 NuGet 套件
+- 新增 API 端點或 Service 方法
+- 新增 Entity 或修改資料庫結構
+- 新增 AI 提供商
+- 修改認證 / 加密 / 錯誤處理邏輯

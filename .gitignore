@@ -1,0 +1,37 @@
+# ── Build 產出 ────────────────────────────────────────────────────────────
+bin/
+obj/
+
+# ── Serilog 日誌（每日產生，不進版控）────────────────────────────────────
+logs/
+*.log
+
+# ── 敏感設定（包含 DB 連線字串、API Key）─────────────────────────────────
+# 本機開發設定包含 SQLEXPRESS 連線字串，不進版控
+ReactL.api/appsettings.Development.json
+ReactL.api/appsettings.Production.json
+
+# .NET User Secrets 儲存位置（Windows：%APPDATA%\Microsoft\UserSecrets）
+# 此資料夾不在專案目錄內，加此行僅為說明用途
+
+# ── Visual Studio 產出 ────────────────────────────────────────────────────
+.vs/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# ── NuGet 快取 ────────────────────────────────────────────────────────────
+packages/
+*.nupkg
+project.lock.json
+project.fragment.lock.json
+artifacts/
+
+# ── 作業系統產出 ──────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ── 環境變數檔（若有使用）────────────────────────────────────────────────
+.env
+.env.local
