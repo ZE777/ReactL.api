@@ -29,5 +29,11 @@ namespace ReactL.api.Services.Ai
         /// 非串流單次呼叫，用於 AI 強化 Prompt（不需要 SSE）
         /// </summary>
         Task<string> CompleteAsync(string systemPrompt, string userPrompt, CancellationToken cancellationToken = default);
+
+        /// <summary>
+        /// 非串流單次呼叫，同時回傳 Token 用量，供 Webhook 等外部觸發場景寫入統計
+        /// </summary>
+        Task<(string Reply, int TokensIn, int TokensOut)> CompleteWithUsageAsync(
+            string systemPrompt, string userPrompt, CancellationToken cancellationToken = default);
     }
 }

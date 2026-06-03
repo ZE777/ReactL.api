@@ -31,6 +31,15 @@ namespace ReactL.api.Controllers.Admin.Monitor
             return Ok(ApiResponse<PagedResponse<ExternalMessageListItem>>.Ok(result));
         }
 
+        /// <summary>取得對話列表（以外部使用者 ID 為單位分組）</summary>
+        [HttpGet("conversations")]
+        [ProducesResponseType(typeof(ApiResponse<PagedResponse<ConversationSummary>>), 200)]
+        public async Task<IActionResult> GetConversations([FromQuery] ConversationQueryParams query)
+        {
+            var result = await _service.GetConversationsAsync(User.GetUserId(), query);
+            return Ok(ApiResponse<PagedResponse<ConversationSummary>>.Ok(result));
+        }
+
         /// <summary>取得 Token 用量統計總覽（含圖表資料）</summary>
         [HttpGet("stats/tokens")]
         [ProducesResponseType(typeof(ApiResponse<StatsSummary>), 200)]

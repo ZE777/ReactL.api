@@ -11,6 +11,10 @@ namespace ReactL.api.Services.Monitor
         Task<PagedResponse<ExternalMessageListItem>> GetExternalMessagesAsync(
             Guid userId, MonitorQueryParams query);
 
+        /// <summary>取得對話列表（以外部使用者 ID 為單位分組）</summary>
+        Task<PagedResponse<ConversationSummary>> GetConversationsAsync(
+            Guid userId, ConversationQueryParams query);
+
         /// <summary>取得 Token 用量統計總覽</summary>
         Task<StatsSummary> GetTokenStatsAsync(Guid userId, StatsQueryParams query);
     }

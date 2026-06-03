@@ -1,4 +1,4 @@
-using Microsoft.EntityFrameworkCore;
+﻿using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using ReactL.api.Common.Exceptions;
 using ReactL.api.Common.Settings;
@@ -146,7 +146,7 @@ namespace ReactL.api.Services.Conversations
         {
             var conv = await GetOwnedAsync(id, userId);
             conv.IsDeleted = true;
-            conv.DeletedAt = DateTime.UtcNow;
+            conv.DeletedAt = DateTime.Now;
             await _db.SaveChangesAsync();
         }
 

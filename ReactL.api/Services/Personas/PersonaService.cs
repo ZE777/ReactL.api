@@ -162,7 +162,7 @@ namespace ReactL.api.Services.Personas
                 throw new ForbiddenException("系統內建 Persona 不可刪除");
 
             persona.IsDeleted = true;
-            persona.DeletedAt = DateTime.UtcNow;
+            persona.DeletedAt = DateTime.Now;
             await _db.SaveChangesAsync();
         }
 

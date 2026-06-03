@@ -117,7 +117,7 @@ namespace ReactL.api.Services.Ai
                 // 累加每日 Token 用量統計（UPSERT）
                 if (tokensIn > 0 || tokensOut > 0)
                 {
-                    var today = DateOnly.FromDateTime(DateTime.UtcNow);
+                    var today = DateOnly.FromDateTime(DateTime.Now);
                     var stat = await _db.TokenUsageStats.FirstOrDefaultAsync(
                         s => s.UserId == userId && s.Date == today && s.ModelType == rawModel && s.Source == TokenSource.Admin,
                         CancellationToken.None);
@@ -227,6 +227,15 @@ namespace ReactL.api.Services.Ai
             string userPrompt,
             CancellationToken cancellationToken = default)
         {
+            var (reply, _, _) = await CompleteWithUsageAsync(systemPrompt, userPrompt, cancellationToken);
+            return reply;
+        }
+
+        public async Task<(string Reply, int TokensIn, int TokensOut)> CompleteWithUsageAsync(
+            string systemPrompt,
+            string userPrompt,
+            CancellationToken cancellationToken = default)
+        {
             var (providerId, modelName) = ParseModelType(_aiSettings.DefaultModel);
             var messages = new[]
             {
@@ -251,11 +260,23 @@ namespace ReactL.api.Services.Ai
 
             var responseJson = await response.Content.ReadAsStringAsync(cancellationToken);
             using var doc = JsonDocument.Parse(responseJson);
-            return doc.RootElement
+            var root = doc.RootElement;
+
+            var reply = root
                 .GetProperty("choices")[0]
                 .GetProperty("message")
                 .GetProperty("content")
                 .GetString() ?? string.Empty;
+
+            // OpenAI 相容格式：prompt_tokens / completion_tokens
+            int tokensIn = 0, tokensOut = 0;
+            if (root.TryGetProperty("usage", out var usage))
+            {
+                if (usage.TryGetProperty("prompt_tokens", out var pt)) tokensIn = pt.GetInt32();
+                if (usage.TryGetProperty("completion_tokens", out var ct)) tokensOut = ct.GetInt32();
+            }
+
+            return (reply, tokensIn, tokensOut);
         }
 
         // ── 私有輔助方法 ──────────────────────────────────────────────────────

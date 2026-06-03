@@ -164,6 +164,8 @@ namespace ReactL.api.Data
                 e.Property(em => em.Platform).HasMaxLength(20).IsRequired();
                 e.Property(em => em.ExternalUserId).HasMaxLength(200).IsRequired();
                 e.Property(em => em.ExternalChannelId).HasMaxLength(200);
+                e.Property(em => em.SenderName).HasMaxLength(200);
+                e.Property(em => em.SenderAvatarUrl).HasMaxLength(500);
                 e.Property(em => em.Role).HasMaxLength(20).IsRequired();
                 e.Property(em => em.Content).HasColumnType("nvarchar(max)").IsRequired();
                 e.HasIndex(em => em.BotBindingId).HasDatabaseName("IX_ExternalMessages_BotBindingId");
@@ -193,11 +195,11 @@ namespace ReactL.api.Data
 
         /// <summary>
         /// 覆寫 SaveChangesAsync，在儲存前統一設定時間戳記
-        /// 避免各 Service 層手動設定 CreatedAt / UpdatedAt，確保使用 UTC 時間
+        /// 避免各 Service 層手動設定 CreatedAt / UpdatedAt，統一使用台灣本地時間
         /// </summary>
         public override Task<int> SaveChangesAsync(CancellationToken cancellationToken = default)
         {
-            var now = DateTime.UtcNow;
+            var now = DateTime.Now;
 
             foreach (var entry in ChangeTracker.Entries<BaseEntity>())
             {

@@ -32,6 +32,18 @@ namespace ReactL.api.Models.External
         /// <remarks>nvarchar(200) · NULL</remarks>
         public string? ExternalChannelId { get; set; }
 
+        /// <summary>
+        /// 傳送者顯示名稱（從 LINE / Discord Profile API 取得，僅 user 角色有值）
+        /// </summary>
+        /// <remarks>nvarchar(200) · NULL</remarks>
+        public string? SenderName { get; set; }
+
+        /// <summary>
+        /// 傳送者頭像 URL（從 LINE / Discord Profile API 取得，僅 user 角色有值）
+        /// </summary>
+        /// <remarks>nvarchar(500) · NULL</remarks>
+        public string? SenderAvatarUrl { get; set; }
+
         /// <summary>訊息角色（user / assistant）</summary>
         /// <remarks>nvarchar(20) · NOT NULL</remarks>
         public string Role { get; set; } = string.Empty;

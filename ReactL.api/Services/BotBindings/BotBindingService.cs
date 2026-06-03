@@ -1,4 +1,4 @@
-using Microsoft.EntityFrameworkCore;
+﻿using Microsoft.EntityFrameworkCore;
 using ReactL.api.Common.Exceptions;
 using ReactL.api.Common.Helpers;
 using ReactL.api.Data;
@@ -124,7 +124,7 @@ namespace ReactL.api.Services.BotBindings
         {
             var binding = await GetOwnedAsync(id, userId);
             binding.IsDeleted = true;
-            binding.DeletedAt = DateTime.UtcNow;
+            binding.DeletedAt = DateTime.Now;
             await _db.SaveChangesAsync();
 
             _logger.LogInformation("Bot 綁定已刪除 UserId={UserId} BotBindingId={BotBindingId} Platform={Platform}",

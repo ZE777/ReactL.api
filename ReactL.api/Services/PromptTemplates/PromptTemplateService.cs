@@ -1,4 +1,4 @@
-using Microsoft.EntityFrameworkCore;
+﻿using Microsoft.EntityFrameworkCore;
 using ReactL.api.Common.Exceptions;
 using ReactL.api.Data;
 using ReactL.api.Domain.PromptTemplates;
@@ -111,7 +111,7 @@ namespace ReactL.api.Services.PromptTemplates
         {
             var template = await GetOwnedAsync(id, userId);
             template.IsDeleted = true;
-            template.DeletedAt = DateTime.UtcNow;
+            template.DeletedAt = DateTime.Now;
             await _db.SaveChangesAsync();
         }
 

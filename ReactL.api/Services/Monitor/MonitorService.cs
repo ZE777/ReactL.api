@@ -1,4 +1,4 @@
-using Microsoft.EntityFrameworkCore;
+﻿using Microsoft.EntityFrameworkCore;
 using ReactL.api.Data;
 using ReactL.api.DTOs.Common;
 using ReactL.api.DTOs.Requests.Monitor;
@@ -6,21 +6,20 @@ using ReactL.api.DTOs.Responses.Monitor;
 
 namespace ReactL.api.Services.Monitor
 {
-    /// <summary>監控服務實作（統計資料是計算後的彙總，直接回傳 DTO）</summary>
     public class MonitorService : IMonitorService
     {
         private readonly AppDbContext _db;
+        private readonly ILogger<MonitorService> _logger;
 
-        public MonitorService(AppDbContext db)
+        public MonitorService(AppDbContext db, ILogger<MonitorService> logger)
         {
             _db = db;
+            _logger = logger;
         }
 
-        /// <summary>取得分頁的外部訊息列表（透過 BotBinding 確認訊息屬於當前使用者）</summary>
         public async Task<PagedResponse<ExternalMessageListItem>> GetExternalMessagesAsync(
             Guid userId, MonitorQueryParams query)
         {
-            // 透過 BotBinding 確認訊息屬於當前使用者
             var q = _db.ExternalMessages
                 .AsNoTracking()
                 .Where(em => em.BotBinding.UserId == userId);
@@ -41,6 +40,8 @@ namespace ReactL.api.Services.Monitor
             var pageSize = Math.Clamp(query.PageSize, 1, 100);
             var page = Math.Max(query.Page, 1);
 
+            bool isChatMode = !string.IsNullOrWhiteSpace(query.ExternalUserId);
+
             var items = await q
                 .OrderByDescending(em => em.CreatedAt)
                 .Skip((page - 1) * pageSize)
@@ -53,10 +54,9 @@ namespace ReactL.api.Services.Monitor
                     ExternalUserId = em.ExternalUserId,
                     ExternalChannelId = em.ExternalChannelId,
                     Role = em.Role,
-                    // 截斷長訊息，避免列表資料量過大（EF Core Expression Tree 不支援 range，用 Substring）
-                    ContentPreview = em.Content.Length > 100
-                        ? em.Content.Substring(0, 100) + "…"
-                        : em.Content,
+                    ContentPreview = isChatMode || em.Content.Length <= 100
+                        ? em.Content
+                        : em.Content.Substring(0, 100) + "...",
                     TokensIn = em.TokensIn,
                     TokensOut = em.TokensOut,
                     CreatedAt = em.CreatedAt
@@ -72,7 +72,98 @@ namespace ReactL.api.Services.Monitor
             };
         }
 
-        /// <summary>取得 Token 用量統計總覽（Dashboard 卡片 + 圖表資料）</summary>
+        public async Task<PagedResponse<ConversationSummary>> GetConversationsAsync(
+            Guid userId, ConversationQueryParams query)
+        {
+            var q = _db.ExternalMessages
+                .AsNoTracking()
+                .Where(em => em.BotBinding.UserId == userId);
+
+            if (!string.IsNullOrWhiteSpace(query.Platform))
+                q = q.Where(em => em.Platform == query.Platform);
+
+            var grouped = q
+                .GroupBy(em => new
+                {
+                    em.Platform,
+                    BotName = em.BotBinding.BotName,
+                    em.ExternalUserId,
+                    em.ExternalChannelId
+                })
+                .Select(g => new ConversationSummary
+                {
+                    Platform = g.Key.Platform,
+                    BotName = g.Key.BotName,
+                    ExternalUserId = g.Key.ExternalUserId,
+                    ExternalChannelId = g.Key.ExternalChannelId,
+                    MessageCount = g.Count(),
+                    LastMessageAt = g.Max(em => em.CreatedAt)
+                });
+
+            var total = await grouped.CountAsync();
+            var pageSize = Math.Clamp(query.PageSize, 1, 100);
+            var page = Math.Max(query.Page, 1);
+
+            var items = await grouped
+                .OrderByDescending(c => c.LastMessageAt)
+                .Skip((page - 1) * pageSize)
+                .Take(pageSize)
+                .ToListAsync();
+
+            // 補上暱稱與頭像（若資料庫尚未執行 add_sender_profile.sql 遷移則略過）
+            if (items.Count > 0)
+            {
+                try
+                {
+                    var userIds = items.Select(i => i.ExternalUserId).Distinct().ToList();
+
+                    var profileRows = await _db.ExternalMessages
+                        .AsNoTracking()
+                        .Where(em => em.BotBinding.UserId == userId
+                                  && userIds.Contains(em.ExternalUserId)
+                                  && em.Role == "user"
+                                  && em.SenderName != null)
+                        .Select(em => new
+                        {
+                            em.ExternalUserId,
+                            em.SenderName,
+                            em.SenderAvatarUrl,
+                            em.CreatedAt
+                        })
+                        .ToListAsync();
+
+                    var profileMap = profileRows
+                        .GroupBy(p => p.ExternalUserId)
+                        .ToDictionary(
+                            g => g.Key,
+                            g => g.OrderByDescending(p => p.CreatedAt).First());
+
+                    foreach (var item in items)
+                    {
+                        if (profileMap.TryGetValue(item.ExternalUserId, out var profile))
+                        {
+                            item.SenderName = profile.SenderName;
+                            item.SenderAvatarUrl = profile.SenderAvatarUrl;
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    // 資料庫尚未執行 add_sender_profile.sql 遷移時，欄位不存在會拋例外
+                    // 優雅降級：對話列表仍正常顯示，僅暱稱與頭像留空
+                    _logger.LogWarning(ex, "無法取得傳送者 Profile，請確認已執行 add_sender_profile.sql");
+                }
+            }
+
+            return new PagedResponse<ConversationSummary>
+            {
+                Items = items,
+                TotalCount = total,
+                Page = page,
+                PageSize = pageSize
+            };
+        }
+
         public async Task<StatsSummary> GetTokenStatsAsync(Guid userId, StatsQueryParams query)
         {
             var q = _db.TokenUsageStats
@@ -111,6 +202,25 @@ namespace ReactL.api.Services.Monitor
                     .Select(g => new TokenStatsByModel
                     {
                         ModelType = g.Key,
+                        TokensIn = g.Sum(t => t.TokensIn),
+                        TokensOut = g.Sum(t => t.TokensOut),
+                        RequestCount = g.Sum(t => t.RequestCount),
+                        BySource = g.GroupBy(t => t.Source)
+                            .Select(sg => new TokenStatsBySource
+                            {
+                                Source = sg.Key,
+                                TokensIn = sg.Sum(t => t.TokensIn),
+                                TokensOut = sg.Sum(t => t.TokensOut),
+                                RequestCount = sg.Sum(t => t.RequestCount)
+                            })
+                            .ToList()
+                    })
+                    .ToList(),
+                BySource = stats
+                    .GroupBy(t => t.Source)
+                    .Select(g => new TokenStatsBySource
+                    {
+                        Source = g.Key,
                         TokensIn = g.Sum(t => t.TokensIn),
                         TokensOut = g.Sum(t => t.TokensOut),
                         RequestCount = g.Sum(t => t.RequestCount)

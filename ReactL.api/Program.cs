@@ -14,6 +14,7 @@ using ReactL.api.Services.Monitor;
 using ReactL.api.Services.Personas;
 using ReactL.api.Services.PromptTemplates;
 using ReactL.api.Services.Users;
+using ReactL.api.Services.Webhooks;
 using Serilog;
 using System.Text;
 
@@ -165,6 +166,7 @@ namespace ReactL.api
                 builder.Services.AddScoped<IConversationService, ConversationService>();
                 builder.Services.AddScoped<IAiService, OpenAiService>();
                 builder.Services.AddScoped<IMonitorService, MonitorService>();
+                builder.Services.AddScoped<ILineWebhookService, LineWebhookService>();
 
                 // ── HttpClient（多 AI 提供商）─────────────────────────────────────────────
                 // 使用 IHttpClientFactory 管理 HttpClient 生命週期，避免 Socket 耗盡

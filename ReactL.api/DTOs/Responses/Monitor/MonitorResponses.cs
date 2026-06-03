@@ -34,6 +34,34 @@ namespace ReactL.api.DTOs.Responses.Monitor
         public DateTime CreatedAt { get; set; }
     }
 
+    /// <summary>對話列表項目（以外部使用者 ID 為單位分組）</summary>
+    public class ConversationSummary
+    {
+        /// <summary>訊息來源平台：line / discord</summary>
+        public string Platform { get; set; } = string.Empty;
+
+        /// <summary>所屬 Bot 名稱</summary>
+        public string BotName { get; set; } = string.Empty;
+
+        /// <summary>外部平台的使用者識別碼</summary>
+        public string ExternalUserId { get; set; } = string.Empty;
+
+        /// <summary>外部平台的頻道識別碼（群組訊息時有值）</summary>
+        public string? ExternalChannelId { get; set; }
+
+        /// <summary>與此使用者的訊息總數</summary>
+        public int MessageCount { get; set; }
+
+        /// <summary>最後一則訊息的建立時間</summary>
+        public DateTime LastMessageAt { get; set; }
+
+        /// <summary>使用者的顯示名稱（從 LINE / Discord Profile API 取得，可能為 null）</summary>
+        public string? SenderName { get; set; }
+
+        /// <summary>使用者的頭像 URL（從 LINE / Discord Profile API 取得，可能為 null）</summary>
+        public string? SenderAvatarUrl { get; set; }
+    }
+
     /// <summary>依日期彙總的 Token 用量（圖表資料）</summary>
     public class TokenStatsByDate
     {
@@ -50,11 +78,11 @@ namespace ReactL.api.DTOs.Responses.Monitor
         public int RequestCount { get; set; }
     }
 
-    /// <summary>依模型彙總的 Token 用量</summary>
-    public class TokenStatsByModel
+    /// <summary>依來源彙總的 Token 用量（admin / web / line / discord）</summary>
+    public class TokenStatsBySource
     {
-        /// <summary>模型識別碼，格式為 providerId:modelId</summary>
-        public string ModelType { get; set; } = string.Empty;
+        /// <summary>來源識別碼，對應 TokenSource 常數</summary>
+        public string Source { get; set; } = string.Empty;
 
         /// <summary>輸入 Token 總數</summary>
         public int TokensIn { get; set; }
@@ -64,6 +92,25 @@ namespace ReactL.api.DTOs.Responses.Monitor
 
         /// <summary>請求次數</summary>
         public int RequestCount { get; set; }
+    }
+
+    /// <summary>依模型彙總的 Token 用量（含各來源細分）</summary>
+    public class TokenStatsByModel
+    {
+        /// <summary>模型識別碼，格式為 providerId:modelId</summary>
+        public string ModelType { get; set; } = string.Empty;
+
+        /// <summary>輸入 Token 總數（所有來源合計）</summary>
+        public int TokensIn { get; set; }
+
+        /// <summary>輸出 Token 總數（所有來源合計）</summary>
+        public int TokensOut { get; set; }
+
+        /// <summary>請求次數（所有來源合計）</summary>
+        public int RequestCount { get; set; }
+
+        /// <summary>各來源細分（用於前端顯示內外部顏色區分）</summary>
+        public List<TokenStatsBySource> BySource { get; set; } = [];
     }
 
     /// <summary>統計總覽（Dashboard 卡片用）</summary>
@@ -81,7 +128,10 @@ namespace ReactL.api.DTOs.Responses.Monitor
         /// <summary>依日期分組的統計資料（折線圖用）</summary>
         public List<TokenStatsByDate> ByDate { get; set; } = [];
 
-        /// <summary>依模型分組的統計資料（圓餅圖用）</summary>
+        /// <summary>依模型分組的統計資料（含來源細分）</summary>
         public List<TokenStatsByModel> ByModel { get; set; } = [];
+
+        /// <summary>依來源分組的統計資料（admin / web / line / discord）</summary>
+        public List<TokenStatsBySource> BySource { get; set; } = [];
     }
 }

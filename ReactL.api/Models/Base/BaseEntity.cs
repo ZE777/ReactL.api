@@ -13,7 +13,7 @@ namespace ReactL.api.Models.Base
         /// <remarks>uniqueidentifier · NOT NULL · 主鍵PK</remarks>
         public Guid Id { get; set; } = Guid.NewGuid();
 
-        /// <summary>建立時間，由 AppDbContext.SaveChangesAsync 統一設定為 UTC 時間</summary>
+        /// <summary>建立時間，由 AppDbContext.SaveChangesAsync 統一設定（DateTime.Now，台灣時間 CST+8）</summary>
         /// <remarks>datetime2 · NOT NULL</remarks>
         public DateTime CreatedAt { get; set; }
     }

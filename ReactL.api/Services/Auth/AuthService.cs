@@ -74,7 +74,7 @@ namespace ReactL.api.Services.Auth
                 throw new ForbiddenException("帳號已停用，請聯繫管理員");
             }
 
-            user.LastLoginAt = DateTime.UtcNow;
+            user.LastLoginAt = DateTime.Now;
             await _db.SaveChangesAsync();
 
             _logger.LogInformation("使用者登入成功 UserId={UserId} Email={Email}", user.Id, user.Email);
@@ -84,7 +84,7 @@ namespace ReactL.api.Services.Auth
         /// <summary>將 User Entity 轉換為業務結果 Domain，並產生 JWT Token</summary>
         private AuthResultDomain BuildAuthResultDomain(User user)
         {
-            var expiresAt = DateTime.UtcNow.AddMinutes(_jwt.ExpirationMinutes);
+            var expiresAt = DateTime.Now.AddMinutes(_jwt.ExpirationMinutes);
             var token = GenerateJwtToken(user, expiresAt);
 
             return new AuthResultDomain
