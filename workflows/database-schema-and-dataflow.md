@@ -289,6 +289,20 @@ BaseEntity
 - ExternalMessages：外部監控紀錄，不需軟刪除
 - TokenUsageStats：分析資料，只增不刪
 
+**為什麼用軟刪除而非直接 DELETE**：
+
+1. **資料關聯性保護**  
+   BotBindings 被 ExternalMessages 外鍵引用，直接硬刪除 Bot 會連帶刪除所有歷史對話監控紀錄（CASCADE），或導致外鍵孤立。軟刪除讓父資料邏輯消失但實體保留，子資料仍可正常讀取。
+
+2. **可追蹤與稽核**  
+   `DeletedAt` 記錄刪除時間，未來若需要稽核「誰在什麼時候刪了什麼」有據可查。直接 DELETE 後資料從資料庫消失，無法追溯。
+
+3. **誤刪可還原**  
+   BotBindings 儲存加密後的 Bot Token，一旦硬刪除即不可逆。軟刪除保留了管理員介入還原的可能性。
+
+4. **全系統行為一致**  
+   統一走軟刪除策略，避免不同資料表採用不同刪除機制，降低維護複雜度。Global Query Filter 確保所有查詢行為一致，不會因遺漏 `WHERE IsDeleted = 0` 而查出已刪資料。
+
 ---
 
 ## 7. ER 關聯圖

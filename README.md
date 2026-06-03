@@ -159,6 +159,28 @@ ReactL.api/
 - Bot Token 與 Channel Secret 以 AES-256-CBC 加密後才儲存至資料庫
 - 登入錯誤回傳統一訊息，防止帳號列舉攻擊
 
+### Bot 憑證安全設計（AES 加密 + 不回傳原值）
+
+Bot Token 與 Channel Secret 採取「**只進不出**」原則：
+
+| 操作 | 行為 |
+|------|------|
+| 建立 / Rotate | 明文 → `AesEncryptionHelper.Encrypt()` → 存入 DB，同時儲存後 4 碼（`TokenLastFour`）|
+| 讀取（列表/詳情）| 只回傳 `TokenLastFour`，加密欄位不出現在任何 DTO |
+| Webhook 驗簽 | Service 層內部 `Decrypt()` 使用，結果不離開後端 |
+| 前端編輯表單 | 欄位留空 = 保持原值不動；填入新值 = 觸發 Rotate |
+
+**為什麼 AES 可解密但 API 不回傳**：
+
+AES 加密解決的是「**靜態儲存**」風險（資料庫洩漏時攻擊者拿到的是密文）。  
+若 API 將解密後的明文回傳給前端，等同於加密形同虛設，因為：
+
+- HTTPS 雖加密傳輸，但 Browser DevTools Network 面板直接可見 Response Body
+- 若前端存在 XSS 漏洞，JS 記憶體中的 Token 可被竊取
+- 前端錯誤追蹤工具（如 Sentry）可能把 API Response 記錄進日誌
+
+**結論**：憑證一旦儲存，只在後端內部使用，前端僅能看到後 4 碼作為識別用途。忘記 Token 的正確做法是回到 LINE / Discord Developer Console 重新取得，再透過 Rotate Token 更新。
+
 ---
 
 ## 錯誤處理

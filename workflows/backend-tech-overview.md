@@ -1,6 +1,6 @@
 # ReactL.api 後端技術總覽
 
-> 最後更新：2026-06-02
+> 最後更新：2026-06-03
 > 專案：ReactL Prompt Studio（後台 API）
 > 框架：ASP.NET Core 8.0 / .NET 8
 
@@ -42,53 +42,77 @@
 
 ## 2. 專案架構
 
-採用 **Controller → Service → DbContext** 三層架構，無獨立 Repository 層。
+採用 **Controller → Service → DbContext** 三層架構，無獨立 Repository 層。  
+Service 回傳 **Domain 物件**，Controller 再 map 成 **Response DTO**。
 
 ```
-Controllers/          路由入口，只做參數驗證與回應包裝
-├── Ai/
-├── Auth/
-├── Conversations/
-├── Personas/
-├── BotBindings/
-├── PromptTemplates/
-├── Users/
-└── Monitor/
+Controllers/          路由入口，只做參數驗證與 Domain → Response DTO 轉換
+├── Admin/            後台登入使用者的 API
+│   ├── Ai/
+│   ├── Auth/
+│   ├── BotBindings/
+│   ├── Conversations/
+│   ├── Monitor/
+│   ├── Personas/
+│   ├── PromptTemplates/
+│   └── Users/
+└── Web/              公開前台 API（無需登入或僅需 ShareSlug）
+    ├── Chat/
+    ├── Conversations/
+    └── Personas/
 
-Services/             業務邏輯，直接注入 AppDbContext
+Services/             業務邏輯，直接注入 AppDbContext，Entity → Domain 投影
 ├── Auth/
 ├── AI/
-├── Personas/
-├── Conversations/
 ├── BotBindings/
+├── Conversations/
+├── Monitor/
+├── Personas/
 ├── PromptTemplates/
-├── Users/
-└── Monitor/
+└── Users/
+
+Domain/               業務物件層，Service 回傳型別，不含敏感欄位
+├── Auth/             AuthResultDomain, UserDomain
+├── BotBindings/      BotBindingDomain
+├── Conversations/    ConversationDomain, MessageDomain
+├── Monitor/          ExternalMessageDomain
+├── Personas/         PersonaDomain, PersonaVersionDomain
+└── PromptTemplates/  PromptTemplateDomain
 
 Data/
 ├── AppDbContext.cs
 └── AppDbContextFactory.cs   (EF CLI 用，繞過 Host 啟動)
 
-Models/               Entity，對應資料庫資料表
+Models/               Entity，唯一對應 SQL 資料表的位置
 ├── Base/             BaseEntity / AuditableEntity / SoftDeletableEntity
 ├── Auth/
-├── Personas/
-├── Conversations/
 ├── BotBindings/
-├── PromptTemplates/
+├── Conversations/
 ├── External/
+├── Personas/
+├── PromptTemplates/
 └── Stats/
 
-DTOs/                 請求 / 回應物件，不暴露 Entity 結構
+DTOs/                 HTTP 傳輸物件，分 Requests / Responses 兩個方向
 ├── Common/           ApiResponse<T>、PagedResponse<T>
-├── Auth/
-├── Ai/
-├── Personas/
-├── Conversations/
-├── BotBindings/
-├── PromptTemplates/
-├── Users/
-└── Monitor/
+├── Requests/         前端送入的輸入物件，含驗證 Attribute
+│   ├── Ai/
+│   ├── Auth/
+│   ├── BotBindings/
+│   ├── Conversations/
+│   ├── Monitor/
+│   ├── Personas/
+│   ├── PromptTemplates/
+│   └── Users/
+└── Responses/        定義 API 回傳格式
+    ├── Ai/
+    ├── Auth/
+    ├── BotBindings/
+    ├── Conversations/
+    ├── Monitor/
+    ├── Personas/
+    ├── PromptTemplates/
+    └── Users/
 
 Middleware/
 └── ExceptionMiddleware.cs   全域例外攔截 → ProblemDetails
@@ -99,6 +123,20 @@ Common/
 ├── Extensions/       ClaimsPrincipalExtensions
 ├── Helpers/          AesEncryptionHelper
 └── Settings/         強型別設定注入
+```
+
+**完整資料流向**：
+
+```
+HTTP Request
+    ↓ Request DTO（驗證輸入）
+Controller 呼叫 Service
+    ↓ IXxxService 介面
+Service 查詢 AppDbContext
+    ↓ Entity → Domain（過濾敏感欄位、加入 JOIN 計算欄位）
+Controller 收到 Domain
+    ↓ Domain → Response DTO（private static ToXxxResponse 方法）
+ApiResponse<T>.Ok(dto) 回傳
 ```
 
 **API 路由規範**：`/api/v1/{resource}`
@@ -352,17 +390,45 @@ public class AesEncryptionHelper {
 
 ---
 
-## 8. DTO 與 Entity 設計規範
+## 8. 物件分層設計規範
+
+### 三層物件職責
+
+| 物件類型 | 位置 | 職責 | 說明 |
+|---------|------|------|------|
+| Entity | `Models/` | SQL 完整對應 | 含 PasswordHash、BotTokenEncrypted 等敏感欄位 |
+| Domain | `Domain/` | 業務物件（Service 回傳） | 已過濾敏感欄位，可含 JOIN 計算欄位（PersonaName 等）|
+| Request DTO | `DTOs/Requests/` | 驗證前端輸入 | 含 `[Required]`、`[MaxLength]` 等驗證 Attribute |
+| Response DTO | `DTOs/Responses/` | 定義 API 合約 | 列表與詳情分開定義，欄位按情境選取 |
+
+**Monitor 和 AI 服務例外**：產出聚合統計資料或 SSE 協議物件，Service 直接回傳 DTO（不走 Domain 層）。
 
 ### DTO 命名規則
 
 | 用途 | 命名 |
 |------|------|
-| 列表摘要 | `{Entity}ListItem` |
-| 單筆詳情 | `{Entity}DetailResponse` |
-| 建立請求 | `Create{Entity}Request` |
-| 更新請求 | `Update{Entity}Request` |
-| 版本相關 | `{Entity}VersionItem` / `{Entity}VersionDetailResponse` |
+| 列表摘要 | `{Resource}ListItem` |
+| 單筆詳情 | `{Resource}DetailResponse` |
+| 建立請求 | `Create{Resource}Request` |
+| 更新請求 | `Update{Resource}Request` |
+| 查詢條件 | `{Resource}QueryParams` |
+| 版本相關 | `{Resource}VersionItem` / `{Resource}VersionDetailResponse` |
+
+### Entity XML 文件規範
+
+所有 Entity 欄位都需要 XML `<summary>`（用途說明）和 `<remarks>`（SQL 型別 + 約束）：
+
+```csharp
+/// <summary>角色名稱，用於列表顯示與搜尋</summary>
+/// <remarks>nvarchar(100) · NOT NULL</remarks>
+public string Name { get; set; } = string.Empty;
+
+/// <summary>使用的 AI 模型識別碼，例如 "groq:llama-3.3-70b-versatile"</summary>
+/// <remarks>nvarchar(50) · NOT NULL · FK → Users ON DELETE SET NULL</remarks>
+public Guid? UserId { get; set; }
+```
+
+`<remarks>` 格式：`{SQL型別} · {NOT NULL | NULL} · {其他限制}`
 
 ### 常數定義（`Common/Constants/`）
 
