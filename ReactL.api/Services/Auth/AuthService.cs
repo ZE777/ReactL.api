@@ -4,7 +4,8 @@ using Microsoft.IdentityModel.Tokens;
 using ReactL.api.Common.Exceptions;
 using ReactL.api.Common.Settings;
 using ReactL.api.Data;
-using ReactL.api.DTOs.Auth;
+using ReactL.api.Domain.Auth;
+using ReactL.api.DTOs.Requests.Auth;
 using ReactL.api.Models.Auth;
 using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
@@ -12,6 +13,7 @@ using System.Text;
 
 namespace ReactL.api.Services.Auth
 {
+    /// <summary>認證服務實作</summary>
     public class AuthService : IAuthService
     {
         private readonly AppDbContext _db;
@@ -23,7 +25,8 @@ namespace ReactL.api.Services.Auth
             _jwt = jwt.Value;
         }
 
-        public async Task<AuthResponse> RegisterAsync(RegisterRequest request)
+        /// <summary>註冊新帳號，若 Email 已存在則拋出 ConflictException</summary>
+        public async Task<AuthResultDomain> RegisterAsync(RegisterRequest request)
         {
             // Email 不分大小寫比對，防止用 User@example.com 繞過 user@example.com 的唯一限制
             var exists = await _db.Users
@@ -43,10 +46,11 @@ namespace ReactL.api.Services.Auth
             _db.Users.Add(user);
             await _db.SaveChangesAsync();
 
-            return BuildAuthResponse(user);
+            return BuildAuthResultDomain(user);
         }
 
-        public async Task<AuthResponse> LoginAsync(LoginRequest request)
+        /// <summary>驗證帳號密碼，不區分「帳號不存在」與「密碼錯誤」防止帳號列舉</summary>
+        public async Task<AuthResultDomain> LoginAsync(LoginRequest request)
         {
             // 故意不區分「帳號不存在」與「密碼錯誤」，統一回傳相同訊息，防止帳號列舉攻擊
             var user = await _db.Users
@@ -61,28 +65,34 @@ namespace ReactL.api.Services.Auth
             user.LastLoginAt = DateTime.UtcNow;
             await _db.SaveChangesAsync();
 
-            return BuildAuthResponse(user);
+            return BuildAuthResultDomain(user);
         }
 
-        private AuthResponse BuildAuthResponse(User user)
+        /// <summary>將 User Entity 轉換為業務結果 Domain，並產生 JWT Token</summary>
+        private AuthResultDomain BuildAuthResultDomain(User user)
         {
             var expiresAt = DateTime.UtcNow.AddMinutes(_jwt.ExpirationMinutes);
             var token = GenerateJwtToken(user, expiresAt);
 
-            return new AuthResponse
+            return new AuthResultDomain
             {
                 Token = token,
                 ExpiresAt = expiresAt,
-                User = new UserInfo
+                User = new UserDomain
                 {
                     Id = user.Id,
                     Email = user.Email,
                     DisplayName = user.DisplayName,
-                    Role = user.Role
+                    Role = user.Role,
+                    IsActive = user.IsActive,
+                    LastLoginAt = user.LastLoginAt,
+                    CreatedAt = user.CreatedAt,
+                    UpdatedAt = user.UpdatedAt
                 }
             };
         }
 
+        /// <summary>產生包含 userId、email、role 的 JWT Token</summary>
         private string GenerateJwtToken(User user, DateTime expiresAt)
         {
             var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(_jwt.SecretKey));

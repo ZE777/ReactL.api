@@ -3,11 +3,13 @@ using Microsoft.Extensions.Options;
 using ReactL.api.Common.Exceptions;
 using ReactL.api.Common.Settings;
 using ReactL.api.Data;
-using ReactL.api.DTOs.Conversations;
+using ReactL.api.Domain.Conversations;
+using ReactL.api.DTOs.Requests.Conversations;
 using ReactL.api.Models.Conversations;
 
 namespace ReactL.api.Services.Conversations
 {
+    /// <summary>對話服務實作</summary>
     public class ConversationService : IConversationService
     {
         private readonly AppDbContext _db;
@@ -19,23 +21,27 @@ namespace ReactL.api.Services.Conversations
             _aiSettings = aiOptions.Value;
         }
 
-        public async Task<List<ConversationListItem>> GetListAsync(Guid userId)
+        /// <summary>取得使用者的對話清單（釘選優先，再依更新時間排序）</summary>
+        public async Task<List<ConversationDomain>> GetListAsync(Guid userId)
         {
             return await _db.Conversations
                 .AsNoTracking()
                 .Where(c => c.UserId == userId)
                 .OrderByDescending(c => c.IsPinned)
                 .ThenByDescending(c => c.UpdatedAt)
-                .Select(c => new ConversationListItem
+                .Select(c => new ConversationDomain
                 {
                     Id = c.Id,
+                    UserId = c.UserId,
                     Title = c.Title,
                     ModelType = c.ModelType,
                     IsPinned = c.IsPinned,
                     IsPublic = c.IsPublic,
+                    IsDeleted = c.IsDeleted,
                     ShareSlug = c.ShareSlug,
                     PersonaId = c.PersonaId,
                     PersonaName = c.Persona != null ? c.Persona.Name : null,
+                    PersonaEmoji = c.Persona != null ? c.Persona.Emoji : null,
                     MessageCount = c.Messages.Count,
                     LastMessagePreview = c.Messages
                         .OrderByDescending(m => m.CreatedAt)
@@ -51,7 +57,8 @@ namespace ReactL.api.Services.Conversations
                 .ToListAsync();
         }
 
-        public async Task<ConversationDetailResponse> GetByIdAsync(Guid id, Guid userId)
+        /// <summary>取得對話詳情（含完整訊息列表）</summary>
+        public async Task<ConversationDomain> GetByIdAsync(Guid id, Guid userId)
         {
             var c = await _db.Conversations
                 .AsNoTracking()
@@ -61,23 +68,29 @@ namespace ReactL.api.Services.Conversations
                 .FirstOrDefaultAsync()
                 ?? throw new NotFoundException("Conversation", id);
 
-            return ToDetailResponse(c);
+            return ToConversationDomain(c);
         }
 
-        public async Task<ConversationDetailResponse> GetBySlugAsync(string slug)
+        /// <summary>
+        /// 依 ShareSlug 取得公開對話（不需登入）
+        /// IgnoreQueryFilters：分享頁需要顯示已刪除對話的唯讀存檔，繞過 Global Query Filter
+        /// </summary>
+        public async Task<ConversationDomain> GetBySlugAsync(string slug)
         {
             var c = await _db.Conversations
                 .AsNoTracking()
+                .IgnoreQueryFilters()
                 .Include(c => c.Persona)
                 .Include(c => c.Messages.OrderBy(m => m.CreatedAt))
                 .Where(c => c.ShareSlug == slug && c.IsPublic)
                 .FirstOrDefaultAsync()
                 ?? throw new NotFoundException("Conversation", slug);
 
-            return ToDetailResponse(c);
+            return ToConversationDomain(c);
         }
 
-        public async Task<ConversationDetailResponse> CreateAsync(Guid userId, CreateConversationRequest request)
+        /// <summary>建立新對話</summary>
+        public async Task<ConversationDomain> CreateAsync(Guid userId, CreateConversationRequest request)
         {
             ValidateModelType(request.ModelType);
             var conv = new Conversation
@@ -93,7 +106,8 @@ namespace ReactL.api.Services.Conversations
             return await GetByIdAsync(conv.Id, userId);
         }
 
-        public async Task<ConversationDetailResponse> UpdateAsync(Guid id, Guid userId, UpdateConversationRequest request)
+        /// <summary>更新對話設定（標題、釘選、公開分享、Persona）</summary>
+        public async Task<ConversationDomain> UpdateAsync(Guid id, Guid userId, UpdateConversationRequest request)
         {
             var conv = await GetOwnedAsync(id, userId);
 
@@ -127,6 +141,7 @@ namespace ReactL.api.Services.Conversations
             return await GetByIdAsync(id, userId);
         }
 
+        /// <summary>軟刪除對話</summary>
         public async Task DeleteAsync(Guid id, Guid userId)
         {
             var conv = await GetOwnedAsync(id, userId);
@@ -135,7 +150,8 @@ namespace ReactL.api.Services.Conversations
             await _db.SaveChangesAsync();
         }
 
-        public async Task<MessageResponse> AddMessageAsync(Guid conversationId, Guid userId, AddMessageRequest request)
+        /// <summary>新增單筆訊息</summary>
+        public async Task<MessageDomain> AddMessageAsync(Guid conversationId, Guid userId, AddMessageRequest request)
         {
             // 確認對話存在且屬於此使用者
             await GetOwnedAsync(conversationId, userId);
@@ -152,9 +168,10 @@ namespace ReactL.api.Services.Conversations
             _db.Messages.Add(message);
             await _db.SaveChangesAsync();
 
-            return new MessageResponse
+            return new MessageDomain
             {
                 Id = message.Id,
+                ConversationId = message.ConversationId,
                 Role = message.Role,
                 Content = message.Content,
                 TokensIn = message.TokensIn,
@@ -163,6 +180,7 @@ namespace ReactL.api.Services.Conversations
             };
         }
 
+        /// <summary>刪除最後一筆 assistant 訊息（Regenerate 前清除舊回應，同時清除配對的 user 訊息）</summary>
         public async Task DeleteLastAssistantMessageAsync(Guid conversationId, Guid userId)
         {
             // 確認對話存在且屬於此使用者
@@ -191,6 +209,7 @@ namespace ReactL.api.Services.Conversations
 
         // ── 私有輔助方法 ──────────────────────────────────────────────────────
 
+        /// <summary>取得使用者有所有權的 Conversation（已追蹤，可直接修改）</summary>
         private async Task<Conversation> GetOwnedAsync(Guid id, Guid userId)
         {
             return await _db.Conversations
@@ -198,20 +217,26 @@ namespace ReactL.api.Services.Conversations
                 ?? throw new NotFoundException("Conversation", id);
         }
 
-        private static ConversationDetailResponse ToDetailResponse(Conversation c) =>
+        /// <summary>將 Conversation Entity 投影為業務 Domain 物件</summary>
+        private static ConversationDomain ToConversationDomain(Conversation c) =>
             new()
             {
                 Id = c.Id,
+                UserId = c.UserId,
                 Title = c.Title,
                 ModelType = c.ModelType,
                 IsPinned = c.IsPinned,
                 IsPublic = c.IsPublic,
+                IsDeleted = c.IsDeleted,
                 ShareSlug = c.ShareSlug,
                 PersonaId = c.PersonaId,
                 PersonaName = c.Persona?.Name,
-                Messages = c.Messages.Select(m => new MessageResponse
+                PersonaEmoji = c.Persona?.Emoji,
+                MessageCount = c.Messages.Count,
+                Messages = c.Messages.Select(m => new MessageDomain
                 {
                     Id = m.Id,
+                    ConversationId = m.ConversationId,
                     Role = m.Role,
                     Content = m.Content,
                     TokensIn = m.TokensIn,
@@ -222,7 +247,7 @@ namespace ReactL.api.Services.Conversations
                 UpdatedAt = c.UpdatedAt
             };
 
-        /// <summary>產生 5 碼 URL-safe 分享短碼</summary>
+        /// <summary>產生 8 碼 URL-safe 分享短碼</summary>
         private static string GenerateSlug()
         {
             const string chars = "abcdefghijklmnopqrstuvwxyz0123456789";

@@ -1,4 +1,4 @@
-﻿using ReactL.api.Models.Auth;
+using ReactL.api.Models.Auth;
 using ReactL.api.Models.Base;
 
 namespace ReactL.api.Models.Stats
@@ -11,24 +11,31 @@ namespace ReactL.api.Models.Stats
     public class TokenUsageStat : BaseEntity
     {
         /// <summary>統計所屬使用者</summary>
+        /// <remarks>uniqueidentifier · NOT NULL · FK → Users</remarks>
         public Guid UserId { get; set; }
 
         /// <summary>統計日期（僅日期，不含時間），以 UTC 日期為準</summary>
+        /// <remarks>date · NOT NULL · UNIQUE 複合 (UserId, Date, ModelType, Source)</remarks>
         public DateOnly Date { get; set; }
 
         /// <summary>使用的 AI 模型識別碼，例如 "gpt-4o-mini"</summary>
+        /// <remarks>nvarchar(50) · NOT NULL · UNIQUE 複合 (UserId, Date, ModelType, Source)</remarks>
         public string ModelType { get; set; } = string.Empty;
 
         /// <summary>Token 消耗來源，參見 Common.Constants.TokenSource 常數</summary>
+        /// <remarks>nvarchar(20) · NOT NULL · UNIQUE 複合 (UserId, Date, ModelType, Source)</remarks>
         public string Source { get; set; } = string.Empty;
 
         /// <summary>當日此模型此來源的總輸入 Token 數（累計值）</summary>
+        /// <remarks>int · NOT NULL · DEFAULT 0</remarks>
         public int TokensIn { get; set; } = 0;
 
         /// <summary>當日此模型此來源的總輸出 Token 數（累計值）</summary>
+        /// <remarks>int · NOT NULL · DEFAULT 0</remarks>
         public int TokensOut { get; set; } = 0;
 
         /// <summary>當日此模型此來源的 AI 請求次數</summary>
+        /// <remarks>int · NOT NULL · DEFAULT 0</remarks>
         public int RequestCount { get; set; } = 0;
 
         // ── 導航屬性 ──────────────────────────────────────────────────────

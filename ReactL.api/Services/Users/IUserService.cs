@@ -1,14 +1,16 @@
-using ReactL.api.DTOs.Users;
+using ReactL.api.Domain.Auth;
+using ReactL.api.DTOs.Requests.Users;
 
 namespace ReactL.api.Services.Users
 {
+    /// <summary>使用者服務介面</summary>
     public interface IUserService
     {
-        /// <summary>取得目前登入使用者的個人資料</summary>
-        Task<UserProfileResponse> GetProfileAsync(Guid userId);
+        /// <summary>取得目前登入使用者的業務物件</summary>
+        Task<UserDomain> GetProfileAsync(Guid userId);
 
-        /// <summary>更新顯示名稱</summary>
-        Task<UserProfileResponse> UpdateProfileAsync(Guid userId, UpdateProfileRequest request);
+        /// <summary>更新顯示名稱，回傳更新後的使用者業務物件</summary>
+        Task<UserDomain> UpdateProfileAsync(Guid userId, UpdateProfileRequest request);
 
         /// <summary>
         /// 修改密碼

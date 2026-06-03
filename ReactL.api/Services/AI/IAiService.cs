@@ -1,7 +1,9 @@
-using ReactL.api.DTOs.Ai;
+using ReactL.api.DTOs.Requests.Ai;
+using ReactL.api.DTOs.Responses.Ai;
 
 namespace ReactL.api.Services.Ai
 {
+    /// <summary>AI 服務介面（SSE 串流協議物件，直接回傳 DTO）</summary>
     public interface IAiService
     {
         /// <summary>
@@ -13,6 +15,14 @@ namespace ReactL.api.Services.Ai
         IAsyncEnumerable<ChatStreamChunk> ChatStreamAsync(
             ChatRequest request,
             Guid userId,
+            CancellationToken cancellationToken);
+
+        /// <summary>
+        /// 前台公開聊天 SSE 串流，無需登入、不寫入 DB
+        /// 前端負責維護對話歷史並每次完整傳入
+        /// </summary>
+        IAsyncEnumerable<ChatStreamChunk> PublicChatStreamAsync(
+            PublicChatRequest request,
             CancellationToken cancellationToken);
 
         /// <summary>

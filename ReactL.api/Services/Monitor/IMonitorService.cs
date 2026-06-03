@@ -1,8 +1,10 @@
 using ReactL.api.DTOs.Common;
-using ReactL.api.DTOs.Monitor;
+using ReactL.api.DTOs.Requests.Monitor;
+using ReactL.api.DTOs.Responses.Monitor;
 
 namespace ReactL.api.Services.Monitor
 {
+    /// <summary>監控服務介面（統計資料是計算後的彙總，直接回傳 DTO）</summary>
     public interface IMonitorService
     {
         /// <summary>取得分頁的外部訊息列表（Monitor 頁）</summary>

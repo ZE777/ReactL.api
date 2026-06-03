@@ -2,11 +2,13 @@ using Microsoft.EntityFrameworkCore;
 using ReactL.api.Common.Exceptions;
 using ReactL.api.Common.Helpers;
 using ReactL.api.Data;
-using ReactL.api.DTOs.BotBindings;
+using ReactL.api.Domain.BotBindings;
+using ReactL.api.DTOs.Requests.BotBindings;
 using ReactL.api.Models.BotBindings;
 
 namespace ReactL.api.Services.BotBindings
 {
+    /// <summary>Bot 綁定服務實作</summary>
     public class BotBindingService : IBotBindingService
     {
         private readonly AppDbContext _db;
@@ -18,15 +20,17 @@ namespace ReactL.api.Services.BotBindings
             _aes = aes;
         }
 
-        public async Task<List<BotBindingListItem>> GetListAsync(Guid userId)
+        /// <summary>取得使用者的 Bot 綁定清單</summary>
+        public async Task<List<BotBindingDomain>> GetListAsync(Guid userId)
         {
             return await _db.BotBindings
                 .AsNoTracking()
                 .Where(b => b.UserId == userId)
                 .OrderByDescending(b => b.CreatedAt)
-                .Select(b => new BotBindingListItem
+                .Select(b => new BotBindingDomain
                 {
                     Id = b.Id,
+                    UserId = b.UserId,
                     Platform = b.Platform,
                     BotName = b.BotName,
                     TokenLastFour = b.TokenLastFour,
@@ -40,15 +44,17 @@ namespace ReactL.api.Services.BotBindings
                 .ToListAsync();
         }
 
-        public async Task<BotBindingDetailResponse> GetByIdAsync(Guid id, Guid userId)
+        /// <summary>取得 Bot 綁定詳情</summary>
+        public async Task<BotBindingDomain> GetByIdAsync(Guid id, Guid userId)
         {
             var b = await _db.BotBindings
                 .AsNoTracking()
                 .Include(b => b.Persona)
                 .Where(b => b.Id == id && b.UserId == userId)
-                .Select(b => new BotBindingDetailResponse
+                .Select(b => new BotBindingDomain
                 {
                     Id = b.Id,
+                    UserId = b.UserId,
                     Platform = b.Platform,
                     BotName = b.BotName,
                     TokenLastFour = b.TokenLastFour,
@@ -64,7 +70,8 @@ namespace ReactL.api.Services.BotBindings
             return b ?? throw new NotFoundException("BotBinding", id);
         }
 
-        public async Task<BotBindingDetailResponse> CreateAsync(Guid userId, CreateBotBindingRequest request)
+        /// <summary>建立 Bot 綁定（LINE 平台必須提供 ChannelSecret，Token 由後端加密儲存）</summary>
+        public async Task<BotBindingDomain> CreateAsync(Guid userId, CreateBotBindingRequest request)
         {
             // LINE 平台必須提供 ChannelSecret
             if (request.Platform == "line" && string.IsNullOrWhiteSpace(request.ChannelSecret))
@@ -93,7 +100,8 @@ namespace ReactL.api.Services.BotBindings
             return await GetByIdAsync(binding.Id, userId);
         }
 
-        public async Task<BotBindingDetailResponse> UpdateAsync(Guid id, Guid userId, UpdateBotBindingRequest request)
+        /// <summary>更新 Bot 設定（名稱、模型、Persona、啟用狀態）</summary>
+        public async Task<BotBindingDomain> UpdateAsync(Guid id, Guid userId, UpdateBotBindingRequest request)
         {
             var binding = await GetOwnedAsync(id, userId);
 
@@ -106,6 +114,7 @@ namespace ReactL.api.Services.BotBindings
             return await GetByIdAsync(id, userId);
         }
 
+        /// <summary>軟刪除 Bot 綁定</summary>
         public async Task DeleteAsync(Guid id, Guid userId)
         {
             var binding = await GetOwnedAsync(id, userId);
@@ -114,7 +123,8 @@ namespace ReactL.api.Services.BotBindings
             await _db.SaveChangesAsync();
         }
 
-        public async Task<BotBindingDetailResponse> RotateTokenAsync(Guid id, Guid userId, RotateTokenRequest request)
+        /// <summary>更換 Bot Token（Token 重新 AES 加密後存回 DB）</summary>
+        public async Task<BotBindingDomain> RotateTokenAsync(Guid id, Guid userId, RotateTokenRequest request)
         {
             var binding = await GetOwnedAsync(id, userId);
 
@@ -128,6 +138,7 @@ namespace ReactL.api.Services.BotBindings
             return await GetByIdAsync(id, userId);
         }
 
+        /// <summary>取得使用者有所有權的 BotBinding（已追蹤，可直接修改）</summary>
         private async Task<BotBinding> GetOwnedAsync(Guid id, Guid userId)
         {
             return await _db.BotBindings

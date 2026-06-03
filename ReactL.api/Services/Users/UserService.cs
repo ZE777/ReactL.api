@@ -1,10 +1,12 @@
 using Microsoft.EntityFrameworkCore;
 using ReactL.api.Common.Exceptions;
 using ReactL.api.Data;
-using ReactL.api.DTOs.Users;
+using ReactL.api.Domain.Auth;
+using ReactL.api.DTOs.Requests.Users;
 
 namespace ReactL.api.Services.Users
 {
+    /// <summary>使用者服務實作</summary>
     public class UserService : IUserService
     {
         private readonly AppDbContext _db;
@@ -14,12 +16,13 @@ namespace ReactL.api.Services.Users
             _db = db;
         }
 
-        public async Task<UserProfileResponse> GetProfileAsync(Guid userId)
+        /// <summary>取得使用者業務物件（不含密碼雜湊等安全欄位）</summary>
+        public async Task<UserDomain> GetProfileAsync(Guid userId)
         {
             var user = await _db.Users
                 .AsNoTracking()
                 .Where(u => u.Id == userId)
-                .Select(u => new UserProfileResponse
+                .Select(u => new UserDomain
                 {
                     Id = u.Id,
                     Email = u.Email,
@@ -27,14 +30,16 @@ namespace ReactL.api.Services.Users
                     Role = u.Role,
                     IsActive = u.IsActive,
                     LastLoginAt = u.LastLoginAt,
-                    CreatedAt = u.CreatedAt
+                    CreatedAt = u.CreatedAt,
+                    UpdatedAt = u.UpdatedAt
                 })
                 .FirstOrDefaultAsync();
 
             return user ?? throw new NotFoundException("User", userId);
         }
 
-        public async Task<UserProfileResponse> UpdateProfileAsync(Guid userId, UpdateProfileRequest request)
+        /// <summary>更新使用者顯示名稱，回傳更新後的業務物件</summary>
+        public async Task<UserDomain> UpdateProfileAsync(Guid userId, UpdateProfileRequest request)
         {
             var user = await _db.Users.FindAsync(userId)
                 ?? throw new NotFoundException("User", userId);
@@ -42,7 +47,7 @@ namespace ReactL.api.Services.Users
             user.DisplayName = request.DisplayName;
             await _db.SaveChangesAsync();
 
-            return new UserProfileResponse
+            return new UserDomain
             {
                 Id = user.Id,
                 Email = user.Email,
@@ -50,10 +55,15 @@ namespace ReactL.api.Services.Users
                 Role = user.Role,
                 IsActive = user.IsActive,
                 LastLoginAt = user.LastLoginAt,
-                CreatedAt = user.CreatedAt
+                CreatedAt = user.CreatedAt,
+                UpdatedAt = user.UpdatedAt
             };
         }
 
+        /// <summary>
+        /// 修改密碼
+        /// 先驗證目前密碼，確認是本人操作
+        /// </summary>
         public async Task ChangePasswordAsync(Guid userId, ChangePasswordRequest request)
         {
             var user = await _db.Users.FindAsync(userId)

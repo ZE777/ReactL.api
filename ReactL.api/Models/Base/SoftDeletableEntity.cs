@@ -9,9 +9,11 @@ namespace ReactL.api.Models.Base
     public abstract class SoftDeletableEntity : AuditableEntity
     {
         /// <summary>軟刪除旗標，true 表示已刪除但保留資料庫記錄</summary>
+        /// <remarks>bit · NOT NULL · DEFAULT 0</remarks>
         public bool IsDeleted { get; set; } = false;
 
         /// <summary>刪除時間，執行軟刪除時由 Service 層設定</summary>
+        /// <remarks>datetime2 · NULL</remarks>
         public DateTime? DeletedAt { get; set; }
     }
 }

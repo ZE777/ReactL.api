@@ -1,10 +1,13 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
+using ReactL.api.Common.Constants;
 using ReactL.api.Common.Exceptions;
 using ReactL.api.Common.Settings;
 using ReactL.api.Data;
-using ReactL.api.DTOs.Ai;
+using ReactL.api.DTOs.Requests.Ai;
+using ReactL.api.DTOs.Responses.Ai;
 using ReactL.api.Models.Conversations;
+using ReactL.api.Models.Stats;
 using System.Net.Http.Headers;
 using System.Runtime.CompilerServices;
 using System.Text;
@@ -110,10 +113,41 @@ namespace ReactL.api.Services.Ai
                 };
                 _db.Messages.Add(assistantMsg);
                 await _db.SaveChangesAsync(CancellationToken.None);
+
+                // 累加每日 Token 用量統計（UPSERT）
+                if (tokensIn > 0 || tokensOut > 0)
+                {
+                    var today = DateOnly.FromDateTime(DateTime.UtcNow);
+                    var stat = await _db.TokenUsageStats.FirstOrDefaultAsync(
+                        s => s.UserId == userId && s.Date == today && s.ModelType == rawModel && s.Source == TokenSource.Admin,
+                        CancellationToken.None);
+
+                    if (stat is null)
+                    {
+                        _db.TokenUsageStats.Add(new TokenUsageStat
+                        {
+                            UserId    = userId,
+                            Date      = today,
+                            ModelType = rawModel,
+                            Source    = TokenSource.Admin,
+                            TokensIn  = tokensIn,
+                            TokensOut = tokensOut,
+                            RequestCount = 1,
+                        });
+                    }
+                    else
+                    {
+                        stat.TokensIn    += tokensIn;
+                        stat.TokensOut   += tokensOut;
+                        stat.RequestCount += 1;
+                    }
+                    await _db.SaveChangesAsync(CancellationToken.None);
+                }
             }
 
             // C-05：第一輪對話完成，呼叫 AI 產生標題並寫入 DB
-            // title_updated 在 done 之前 yield，使前端 done 的 invalidateQueries 能取到最新標題
+            // yield return 不能放在 try-catch 內，改用 generatedTitle 暫存後在外部 yield
+            string? generatedTitle = null;
             if (doneChunk != null && isFirstExchange && fullContent.Length > 0)
             {
                 try
@@ -123,7 +157,8 @@ namespace ReactL.api.Services.Ai
                         "精確描述對話主題，只輸出標題文字，不要加引號、序號或任何說明。";
                     var titleUser = $"使用者訊息：{request.UserMessage}";
 
-                    var newTitle = (await _ai.CompleteAsync(titleSystem, titleUser))
+                    // OpenAiService 本身即 IAiService 實作，直接呼叫自身的 CompleteAsync
+                    var newTitle = (await CompleteAsync(titleSystem, titleUser))
                         .Trim().Trim('"').Trim('「').Trim('」');
 
                     if (!string.IsNullOrWhiteSpace(newTitle))
@@ -134,8 +169,8 @@ namespace ReactL.api.Services.Ai
                         {
                             convToUpdate.Title = newTitle;
                             await _db.SaveChangesAsync(CancellationToken.None);
+                            generatedTitle = newTitle;
                         }
-                        yield return new ChatStreamChunk { Type = "title_updated", Content = newTitle };
                     }
                 }
                 catch (Exception ex)
@@ -144,9 +179,47 @@ namespace ReactL.api.Services.Ai
                 }
             }
 
+            // title_updated 在 done 之前 yield，確保前端 invalidateQueries 取到已更新的標題
+            if (generatedTitle != null)
+                yield return new ChatStreamChunk { Type = "title_updated", Content = generatedTitle };
+
             // 所有 DB 操作完成後才 yield done，確保前端 invalidateQueries 取到完整資料
             if (doneChunk != null)
                 yield return doneChunk;
+        }
+
+        public async IAsyncEnumerable<ChatStreamChunk> PublicChatStreamAsync(
+            PublicChatRequest request,
+            [EnumeratorCancellation] CancellationToken cancellationToken)
+        {
+            // 取得 Persona 的 System Prompt（僅允許 isBuiltin=true 的公開角色）
+            string? systemPrompt = null;
+            if (request.PersonaId.HasValue)
+            {
+                systemPrompt = await _db.Personas
+                    .AsNoTracking()
+                    .Where(p => p.Id == request.PersonaId.Value && p.IsBuiltin)
+                    .Select(p => p.SystemPrompt)
+                    .FirstOrDefaultAsync(cancellationToken);
+            }
+
+            var (providerId, modelName) = ParseModelType(request.ModelType);
+            var providerConfig = _aiSettings.Providers.FirstOrDefault(p => p.Id == providerId);
+            var providerDisplay = providerConfig?.DisplayName ?? providerId;
+            var supportsStreamUsage = providerConfig?.SupportsStreamUsage ?? false;
+
+            // 前端傳入完整歷史，組裝 messages 陣列
+            var messages = new List<object>();
+            if (!string.IsNullOrEmpty(systemPrompt))
+                messages.Add(new { role = "system", content = systemPrompt });
+
+            foreach (var m in request.Messages)
+                messages.Add(new { role = m.Role, content = m.Content });
+
+            messages.Add(new { role = "user", content = request.UserMessage });
+
+            await foreach (var chunk in CallOpenAiStreamAsync(providerId, modelName, providerDisplay, messages, supportsStreamUsage, cancellationToken))
+                yield return chunk;
         }
 
         public async Task<string> CompleteAsync(
@@ -321,6 +394,7 @@ namespace ReactL.api.Services.Ai
 
             // 收集最新 usage chunk，在 [DONE] 時統一 yield 一次 done
             TokenUsage? collectedUsage = null;
+            string? finishReason = null;
 
             while (!reader.EndOfStream && !cancellationToken.IsCancellationRequested)
             {
@@ -330,6 +404,14 @@ namespace ReactL.api.Services.Ai
                 var data = line["data: ".Length..];
                 if (data == "[DONE]")
                 {
+                    // 我們自己的 max_tokens 限制導致回應被截斷
+                    if (finishReason == "length")
+                        yield return new ChatStreamChunk
+                        {
+                            Type = "truncated",
+                            Content = $"回應已達 {_aiSettings.MaxTokens:N0} token 上限而中斷，如需完整回應可至後端設定調高 MaxTokens"
+                        };
+
                     yield return new ChatStreamChunk { Type = "done", Usage = collectedUsage ?? new TokenUsage() };
                     yield break;
                 }
@@ -350,7 +432,13 @@ namespace ReactL.api.Services.Ai
                 if (!root.TryGetProperty("choices", out var choicesEl) || choicesEl.GetArrayLength() == 0)
                     continue;
 
-                var delta = choicesEl[0].GetProperty("delta");
+                var choice = choicesEl[0];
+
+                // 記錄 finish_reason（最終 chunk 才會非 null）
+                if (choice.TryGetProperty("finish_reason", out var fr) && fr.ValueKind == JsonValueKind.String)
+                    finishReason = fr.GetString();
+
+                var delta = choice.GetProperty("delta");
                 if (delta.TryGetProperty("content", out var contentEl) &&
                     contentEl.ValueKind == JsonValueKind.String)
                 {

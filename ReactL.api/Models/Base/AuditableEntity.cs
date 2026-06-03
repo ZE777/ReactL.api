@@ -7,6 +7,7 @@ namespace ReactL.api.Models.Base
     public abstract class AuditableEntity : BaseEntity
     {
         /// <summary>最後更新時間，由 AppDbContext.SaveChangesAsync 於每次修改時自動更新為 UTC</summary>
+        /// <remarks>datetime2 · NOT NULL</remarks>
         public DateTime UpdatedAt { get; set; }
     }
 }

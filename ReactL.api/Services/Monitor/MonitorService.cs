@@ -1,10 +1,12 @@
 using Microsoft.EntityFrameworkCore;
 using ReactL.api.Data;
 using ReactL.api.DTOs.Common;
-using ReactL.api.DTOs.Monitor;
+using ReactL.api.DTOs.Requests.Monitor;
+using ReactL.api.DTOs.Responses.Monitor;
 
 namespace ReactL.api.Services.Monitor
 {
+    /// <summary>監控服務實作（統計資料是計算後的彙總，直接回傳 DTO）</summary>
     public class MonitorService : IMonitorService
     {
         private readonly AppDbContext _db;
@@ -14,6 +16,7 @@ namespace ReactL.api.Services.Monitor
             _db = db;
         }
 
+        /// <summary>取得分頁的外部訊息列表（透過 BotBinding 確認訊息屬於當前使用者）</summary>
         public async Task<PagedResponse<ExternalMessageListItem>> GetExternalMessagesAsync(
             Guid userId, MonitorQueryParams query)
         {
@@ -69,6 +72,7 @@ namespace ReactL.api.Services.Monitor
             };
         }
 
+        /// <summary>取得 Token 用量統計總覽（Dashboard 卡片 + 圖表資料）</summary>
         public async Task<StatsSummary> GetTokenStatsAsync(Guid userId, StatsQueryParams query)
         {
             var q = _db.TokenUsageStats

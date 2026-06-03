@@ -3,12 +3,15 @@ using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using ReactL.api.Common.Exceptions;
 using ReactL.api.Data;
-using ReactL.api.DTOs.Personas;
+using ReactL.api.Domain.Personas;
+using ReactL.api.DTOs.Requests.Personas;
+using ReactL.api.DTOs.Responses.Personas;
 using ReactL.api.Models.Personas;
 using ReactL.api.Services.Ai;
 
 namespace ReactL.api.Services.Personas
 {
+    /// <summary>Persona 服務實作</summary>
     public class PersonaService : IPersonaService
     {
         private readonly AppDbContext _db;
@@ -20,43 +23,69 @@ namespace ReactL.api.Services.Personas
             _ai = ai;
         }
 
-        public async Task<List<PersonaListItem>> GetListAsync(Guid userId)
+        /// <summary>取得開放前台顯示的 Persona 清單（isBuiltin=true）</summary>
+        public async Task<List<PersonaDomain>> GetPublicPersonasAsync()
         {
-            // 回傳系統內建（UserId == null）+ 當前使用者自訂的 Persona
             return await _db.Personas
                 .AsNoTracking()
-                .Where(p => p.UserId == null || p.UserId == userId)
-                .OrderBy(p => p.IsBuiltin ? 0 : 1)
-                .ThenBy(p => p.CreatedAt)
-                .Select(p => new PersonaListItem
+                .Where(p => p.IsBuiltin)
+                .OrderBy(p => p.CreatedAt)
+                .Select(p => new PersonaDomain
                 {
                     Id = p.Id,
-                    Name = p.Name,
-                    Emoji = p.Emoji,
-                    CurrentVersion = p.CurrentVersion,
-                    IsBuiltin = p.IsBuiltin,
                     UserId = p.UserId,
-                    CreatedAt = p.CreatedAt,
-                    UpdatedAt = p.UpdatedAt
-                })
-                .ToListAsync();
-        }
-
-        public async Task<PersonaDetailResponse> GetByIdAsync(Guid id, Guid userId)
-        {
-            var p = await _db.Personas
-                .AsNoTracking()
-                .Where(p => p.Id == id && (p.UserId == null || p.UserId == userId))
-                .Select(p => new PersonaDetailResponse
-                {
-                    Id = p.Id,
                     Name = p.Name,
                     Emoji = p.Emoji,
                     SystemPrompt = p.SystemPrompt,
                     PromptSections = p.PromptSections,
                     CurrentVersion = p.CurrentVersion,
                     IsBuiltin = p.IsBuiltin,
+                    CreatedAt = p.CreatedAt,
+                    UpdatedAt = p.UpdatedAt
+                })
+                .ToListAsync();
+        }
+
+        /// <summary>回傳系統內建（UserId == null）+ 當前使用者自訂的 Persona</summary>
+        public async Task<List<PersonaDomain>> GetListAsync(Guid userId)
+        {
+            return await _db.Personas
+                .AsNoTracking()
+                .Where(p => p.UserId == null || p.UserId == userId)
+                .OrderBy(p => p.IsBuiltin ? 0 : 1)
+                .ThenBy(p => p.CreatedAt)
+                .Select(p => new PersonaDomain
+                {
+                    Id = p.Id,
                     UserId = p.UserId,
+                    Name = p.Name,
+                    Emoji = p.Emoji,
+                    SystemPrompt = p.SystemPrompt,
+                    PromptSections = p.PromptSections,
+                    CurrentVersion = p.CurrentVersion,
+                    IsBuiltin = p.IsBuiltin,
+                    CreatedAt = p.CreatedAt,
+                    UpdatedAt = p.UpdatedAt
+                })
+                .ToListAsync();
+        }
+
+        /// <summary>取得單筆 Persona 詳情</summary>
+        public async Task<PersonaDomain> GetByIdAsync(Guid id, Guid userId)
+        {
+            var p = await _db.Personas
+                .AsNoTracking()
+                .Where(p => p.Id == id && (p.UserId == null || p.UserId == userId))
+                .Select(p => new PersonaDomain
+                {
+                    Id = p.Id,
+                    UserId = p.UserId,
+                    Name = p.Name,
+                    Emoji = p.Emoji,
+                    SystemPrompt = p.SystemPrompt,
+                    PromptSections = p.PromptSections,
+                    CurrentVersion = p.CurrentVersion,
+                    IsBuiltin = p.IsBuiltin,
                     CreatedAt = p.CreatedAt,
                     UpdatedAt = p.UpdatedAt
                 })
@@ -65,7 +94,8 @@ namespace ReactL.api.Services.Personas
             return p ?? throw new NotFoundException("Persona", id);
         }
 
-        public async Task<PersonaDetailResponse> CreateAsync(Guid userId, CreatePersonaRequest request)
+        /// <summary>建立新 Persona（同時建立初始版本快照）</summary>
+        public async Task<PersonaDomain> CreateAsync(Guid userId, CreatePersonaRequest request)
         {
             var persona = new Persona
             {
@@ -74,7 +104,8 @@ namespace ReactL.api.Services.Personas
                 Emoji = request.Emoji,
                 SystemPrompt = request.SystemPrompt,
                 PromptSections = request.PromptSections,
-                CurrentVersion = 1
+                CurrentVersion = 1,
+                IsBuiltin = request.IsBuiltin
             };
 
             _db.Personas.Add(persona);
@@ -93,7 +124,8 @@ namespace ReactL.api.Services.Personas
             return await GetByIdAsync(persona.Id, userId);
         }
 
-        public async Task<PersonaDetailResponse> UpdateAsync(Guid id, Guid userId, UpdatePersonaRequest request)
+        /// <summary>更新 Persona（先快照舊版本，再更新欄位，版本號遞增）</summary>
+        public async Task<PersonaDomain> UpdateAsync(Guid id, Guid userId, UpdatePersonaRequest request)
         {
             var persona = await GetOwnedPersonaAsync(id, userId);
 
@@ -111,17 +143,20 @@ namespace ReactL.api.Services.Personas
             persona.Emoji = request.Emoji;
             persona.SystemPrompt = request.SystemPrompt;
             persona.PromptSections = request.PromptSections;
+            persona.IsBuiltin = request.IsBuiltin;
             persona.CurrentVersion += 1;
 
             await _db.SaveChangesAsync();
             return await GetByIdAsync(id, userId);
         }
 
+        /// <summary>軟刪除 Persona，系統內建（UserId == null）不可刪除</summary>
         public async Task DeleteAsync(Guid id, Guid userId)
         {
             var persona = await GetOwnedPersonaAsync(id, userId);
 
-            if (persona.IsBuiltin)
+            // 只有 UserId == null 的系統預設 Persona 不可刪除，使用者自訂但標為公開的仍可刪除
+            if (persona.IsBuiltin && persona.UserId == null)
                 throw new ForbiddenException("系統內建 Persona 不可刪除");
 
             persona.IsDeleted = true;
@@ -129,7 +164,8 @@ namespace ReactL.api.Services.Personas
             await _db.SaveChangesAsync();
         }
 
-        public async Task<List<PersonaVersionItem>> GetVersionsAsync(Guid personaId, Guid userId)
+        /// <summary>取得指定 Persona 的版本快照清單（確認使用者有存取權後再查詢）</summary>
+        public async Task<List<PersonaVersionDomain>> GetVersionsAsync(Guid personaId, Guid userId)
         {
             // 確認使用者有存取權後再查詢版本
             await GetOwnedPersonaAsync(personaId, userId);
@@ -138,27 +174,31 @@ namespace ReactL.api.Services.Personas
                 .AsNoTracking()
                 .Where(v => v.PersonaId == personaId)
                 .OrderByDescending(v => v.Version)
-                .Select(v => new PersonaVersionItem
+                .Select(v => new PersonaVersionDomain
                 {
                     Id = v.Id,
+                    PersonaId = v.PersonaId,
                     Version = v.Version,
                     SystemPrompt = v.SystemPrompt,
+                    PromptSections = v.PromptSections,
                     ChangeNote = v.ChangeNote,
                     CreatedAt = v.CreatedAt
                 })
                 .ToListAsync();
         }
 
-        public async Task<PersonaVersionDetailResponse> GetVersionDetailAsync(Guid personaId, Guid versionId, Guid userId)
+        /// <summary>取得單一版本快照詳情</summary>
+        public async Task<PersonaVersionDomain> GetVersionDetailAsync(Guid personaId, Guid versionId, Guid userId)
         {
             await GetOwnedPersonaAsync(personaId, userId);
 
             var version = await _db.PersonaVersions
                 .AsNoTracking()
                 .Where(v => v.Id == versionId && v.PersonaId == personaId)
-                .Select(v => new PersonaVersionDetailResponse
+                .Select(v => new PersonaVersionDomain
                 {
                     Id = v.Id,
+                    PersonaId = v.PersonaId,
                     Version = v.Version,
                     SystemPrompt = v.SystemPrompt,
                     PromptSections = v.PromptSections,
@@ -170,7 +210,8 @@ namespace ReactL.api.Services.Personas
             return version ?? throw new NotFoundException("PersonaVersion", versionId);
         }
 
-        public async Task<PersonaDetailResponse> RollbackAsync(Guid personaId, Guid versionId, Guid userId)
+        /// <summary>回滾至指定版本（回滾當作一次新修改，版本號繼續遞增，保留完整歷史）</summary>
+        public async Task<PersonaDomain> RollbackAsync(Guid personaId, Guid versionId, Guid userId)
         {
             var persona = await GetOwnedPersonaAsync(personaId, userId);
 
@@ -197,9 +238,12 @@ namespace ReactL.api.Services.Personas
             return await GetByIdAsync(personaId, userId);
         }
 
+        /// <summary>
+        /// AI 強化 System Prompt（預覽用，不修改 DB）
+        /// 要求 AI 以 JSON 格式分別強化各區塊，方便前端逐一填入對應欄位
+        /// </summary>
         public async Task<EnhancePromptResponse> EnhancePromptAsync(EnhancePromptRequest request)
         {
-            // 要求 AI 以 JSON 格式分別強化各區塊，方便前端逐一填入對應欄位
             const string systemPrompt =
                 "你是一位 prompt engineering 專家，專門優化 AI 角色的 System Prompt 各區塊。" +
                 "請根據使用者提供的各區塊內容進行強化，讓角色定義更清晰、指令更具體、邊界更明確。" +
