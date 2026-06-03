@@ -16,11 +16,13 @@ namespace ReactL.api.Services.Personas
     {
         private readonly AppDbContext _db;
         private readonly IAiService _ai;
+        private readonly ILogger<PersonaService> _logger;
 
-        public PersonaService(AppDbContext db, IAiService ai)
+        public PersonaService(AppDbContext db, IAiService ai, ILogger<PersonaService> logger)
         {
             _db = db;
             _ai = ai;
+            _logger = logger;
         }
 
         /// <summary>取得開放前台顯示的 Persona 清單（isBuiltin=true）</summary>
@@ -235,6 +237,9 @@ namespace ReactL.api.Services.Personas
             persona.CurrentVersion += 1;
 
             await _db.SaveChangesAsync();
+
+            _logger.LogInformation("Persona 版本回滾完成 PersonaId={PersonaId} UserId={UserId} TargetVersion={TargetVersion} NewVersion={NewVersion}",
+                personaId, userId, targetVersion.Version, persona.CurrentVersion);
             return await GetByIdAsync(personaId, userId);
         }
 
@@ -264,6 +269,7 @@ namespace ReactL.api.Services.Personas
             if (!string.IsNullOrWhiteSpace(request.Instruction))
                 sb.AppendLine($"\n強化方向：{request.Instruction}");
 
+            _logger.LogInformation("開始 AI 強化 Prompt");
             var rawJson = await _ai.CompleteAsync(systemPrompt, sb.ToString());
 
             // 剝除 AI 可能包裹的 markdown code block（```json ... ```）
@@ -286,6 +292,8 @@ namespace ReactL.api.Services.Personas
             catch
             {
                 // JSON 解析失敗時降級：將整段結果填入 role 欄位，其餘保持原值
+                _logger.LogWarning("AI 強化 Prompt JSON 解析失敗，降級回傳原始結果 RawJsonPreview={Preview}",
+                    rawJson[..Math.Min(200, rawJson.Length)]);
                 return new EnhancePromptResponse { Sections = new PromptSectionsDto { Role = rawJson } };
             }
         }

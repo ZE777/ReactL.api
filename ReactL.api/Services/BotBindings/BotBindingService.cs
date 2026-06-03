@@ -13,11 +13,13 @@ namespace ReactL.api.Services.BotBindings
     {
         private readonly AppDbContext _db;
         private readonly AesEncryptionHelper _aes;
+        private readonly ILogger<BotBindingService> _logger;
 
-        public BotBindingService(AppDbContext db, AesEncryptionHelper aes)
+        public BotBindingService(AppDbContext db, AesEncryptionHelper aes, ILogger<BotBindingService> logger)
         {
             _db = db;
             _aes = aes;
+            _logger = logger;
         }
 
         /// <summary>取得使用者的 Bot 綁定清單</summary>
@@ -97,6 +99,9 @@ namespace ReactL.api.Services.BotBindings
 
             _db.BotBindings.Add(binding);
             await _db.SaveChangesAsync();
+
+            _logger.LogInformation("Bot 綁定建立成功 UserId={UserId} BotBindingId={BotBindingId} Platform={Platform} BotName={BotName}",
+                userId, binding.Id, binding.Platform, binding.BotName);
             return await GetByIdAsync(binding.Id, userId);
         }
 
@@ -121,6 +126,9 @@ namespace ReactL.api.Services.BotBindings
             binding.IsDeleted = true;
             binding.DeletedAt = DateTime.UtcNow;
             await _db.SaveChangesAsync();
+
+            _logger.LogInformation("Bot 綁定已刪除 UserId={UserId} BotBindingId={BotBindingId} Platform={Platform}",
+                userId, id, binding.Platform);
         }
 
         /// <summary>更換 Bot Token（Token 重新 AES 加密後存回 DB）</summary>
@@ -135,6 +143,9 @@ namespace ReactL.api.Services.BotBindings
                 binding.ChannelSecretEncrypted = _aes.Encrypt(request.NewChannelSecret);
 
             await _db.SaveChangesAsync();
+
+            _logger.LogWarning("Bot Token 已更換 UserId={UserId} BotBindingId={BotBindingId} NewTokenLastFour={TokenLastFour}",
+                userId, id, binding.TokenLastFour);
             return await GetByIdAsync(id, userId);
         }
 

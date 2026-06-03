@@ -18,11 +18,13 @@ namespace ReactL.api.Services.Auth
     {
         private readonly AppDbContext _db;
         private readonly JwtSettings _jwt;
+        private readonly ILogger<AuthService> _logger;
 
-        public AuthService(AppDbContext db, IOptions<JwtSettings> jwt)
+        public AuthService(AppDbContext db, IOptions<JwtSettings> jwt, ILogger<AuthService> logger)
         {
             _db = db;
             _jwt = jwt.Value;
+            _logger = logger;
         }
 
         /// <summary>註冊新帳號，若 Email 已存在則拋出 ConflictException</summary>
@@ -33,7 +35,10 @@ namespace ReactL.api.Services.Auth
                 .AnyAsync(u => u.Email.ToLower() == request.Email.ToLower());
 
             if (exists)
+            {
+                _logger.LogWarning("註冊失敗：Email 已存在 {Email}", request.Email.ToLower());
                 throw new ConflictException("此 Email 已被註冊");
+            }
 
             var user = new User
             {
@@ -46,6 +51,7 @@ namespace ReactL.api.Services.Auth
             _db.Users.Add(user);
             await _db.SaveChangesAsync();
 
+            _logger.LogInformation("新使用者註冊成功 UserId={UserId} Email={Email}", user.Id, user.Email);
             return BuildAuthResultDomain(user);
         }
 
@@ -57,14 +63,21 @@ namespace ReactL.api.Services.Auth
                 .FirstOrDefaultAsync(u => u.Email == request.Email.ToLower());
 
             if (user == null || !BCrypt.Net.BCrypt.Verify(request.Password, user.PasswordHash))
+            {
+                _logger.LogWarning("登入失敗：帳號或密碼錯誤 Email={Email}", request.Email.ToLower());
                 throw new UnauthorizedException("帳號或密碼錯誤");
+            }
 
             if (!user.IsActive)
+            {
+                _logger.LogWarning("登入失敗：帳號已停用 UserId={UserId} Email={Email}", user.Id, user.Email);
                 throw new ForbiddenException("帳號已停用，請聯繫管理員");
+            }
 
             user.LastLoginAt = DateTime.UtcNow;
             await _db.SaveChangesAsync();
 
+            _logger.LogInformation("使用者登入成功 UserId={UserId} Email={Email}", user.Id, user.Email);
             return BuildAuthResultDomain(user);
         }
 

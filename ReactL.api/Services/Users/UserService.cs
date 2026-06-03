@@ -10,10 +10,12 @@ namespace ReactL.api.Services.Users
     public class UserService : IUserService
     {
         private readonly AppDbContext _db;
+        private readonly ILogger<UserService> _logger;
 
-        public UserService(AppDbContext db)
+        public UserService(AppDbContext db, ILogger<UserService> logger)
         {
             _db = db;
+            _logger = logger;
         }
 
         /// <summary>取得使用者業務物件（不含密碼雜湊等安全欄位）</summary>
@@ -71,13 +73,18 @@ namespace ReactL.api.Services.Users
 
             // 先驗證目前密碼，確認是本人操作
             if (!BCrypt.Net.BCrypt.Verify(request.CurrentPassword, user.PasswordHash))
+            {
+                _logger.LogWarning("密碼修改失敗：目前密碼不正確 UserId={UserId}", userId);
                 throw new ValidationException(new Dictionary<string, string[]>
                 {
                     ["currentPassword"] = ["目前密碼不正確"]
                 });
+            }
 
             user.PasswordHash = BCrypt.Net.BCrypt.HashPassword(request.NewPassword);
             await _db.SaveChangesAsync();
+
+            _logger.LogInformation("使用者密碼已修改 UserId={UserId}", userId);
         }
     }
 }
