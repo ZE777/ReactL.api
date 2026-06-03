@@ -52,57 +52,96 @@ ASP.NET Core 8 後端 API，提供 AI Prompt 管理、多輪對話、Persona 角
 
 ## Clone 後需補齊的設定
 
-`.gitignore` 排除了以下**不進版控**的檔案與資料夾，Clone 後需手動建立或設定：
+`.gitignore` 排除了以下**不進版控**的檔案與資料夾，Clone 後需手動補齊：
 
 | 排除項目 | 說明 | 如何補齊 |
 |----------|------|----------|
-| `ReactL.api/appsettings.Development.json` | 本機開發設定（含 DB 連線字串） | 參考下方範例自行建立 |
+| `ReactL.api/appsettings.Development.json` | 本機開發所有敏感設定 | 從備份複製，或參考下方內容手動建立 |
 | `ReactL.api/appsettings.Production.json` | 正式環境設定 | 依部署環境建立或使用環境變數 |
 | `bin/` / `obj/` | 建置產出 | `dotnet build` 自動產生 |
 | `logs/` / `*.log` | Serilog 日誌檔 | 執行時自動產生 |
 | `.vs/` | Visual Studio 工作區設定 | IDE 自動產生 |
 
-### appsettings.Development.json 範例
+### appsettings.Development.json 完整結構
+
+此檔案集中管理**所有本機開發的敏感設定**，不進版控。建立後請填入實際值：
 
 ```json
 {
   "ConnectionStrings": {
-    "DefaultConnection": "Server=(localdb)\\mssqllocaldb;Database=ReactLDb;Trusted_Connection=True;TrustServerCertificate=True;"
+    "DefaultConnection": "Server=你的機器名稱\\SQLEXPRESS;Database=ReactL;User Id=sa;Password=你的密碼;TrustServerCertificate=True;MultipleActiveResultSets=true"
+  },
+  "JwtSettings": {
+    "SecretKey": "填入 32 bytes Base64 隨機字串"
+  },
+  "EncryptionSettings": {
+    "Key": "填入 32 bytes Base64（AES-256 金鑰）",
+    "Iv":  "填入 16 bytes Base64（AES CBC 初始向量）"
+  },
+  "AiSettings": {
+    "DefaultModel": "groq:llama-3.3-70b-versatile",
+    "MaxTokens": 8192,
+    "ProviderKeys": {
+      "groq":       "gsk_...",
+      "mistral":    "...",
+      "cerebras":   "csk-...",
+      "sambanova":  "..."
+    }
   }
 }
 ```
 
-### User Secrets（不存於專案目錄，需個別設定）
+產生 JwtSettings:SecretKey 和 EncryptionSettings 的值（PowerShell）：
 
-以下機敏值透過 .NET User Secrets 管理，**不會出現在任何設定檔**，需在每台開發機器上執行：
+```powershell
+$rng = [System.Security.Cryptography.RNGCryptoServiceProvider]::new()
 
-```bash
-cd ReactL.api
+# JwtSettings:SecretKey 和 EncryptionSettings:Key（32 bytes）
+$buf = New-Object byte[] 32; $rng.GetBytes($buf)
+[Convert]::ToBase64String($buf)
 
-# JWT 簽名金鑰（建議 32 字元以上隨機字串）
-dotnet user-secrets set "Jwt:SecretKey" "<your-jwt-secret>"
-
-# AES 加密金鑰（Bot Token 加密用）
-dotnet user-secrets set "Encryption:Key" "<32-byte-hex-key>"
-dotnet user-secrets set "Encryption:IV"  "<16-byte-hex-iv>"
-
-# AI Provider API Keys（依需求設定）
-dotnet user-secrets set "AiSettings:Providers:0:ApiKey" "<groq-api-key>"
-dotnet user-secrets set "AiSettings:Providers:1:ApiKey" "<mistral-api-key>"
-dotnet user-secrets set "AiSettings:Providers:2:ApiKey" "<cerebras-api-key>"
-dotnet user-secrets set "AiSettings:Providers:3:ApiKey" "<sambanova-api-key>"
+# EncryptionSettings:Iv（16 bytes）
+$buf = New-Object byte[] 16; $rng.GetBytes($buf)
+[Convert]::ToBase64String($buf)
 ```
 
-> User Secrets 儲存於 `%APPDATA%\Microsoft\UserSecrets\<project-id>\secrets.json`，不在專案目錄內。
+> **⚠️ AES Key / IV 一旦設定且資料庫有 Bot 資料後不可更換**，否則已加密儲存的 Bot Token 將無法解密。請務必另行備份這兩個值。
 
 ---
 
-## 快速開始
+## 換機器遷移步驟
 
-### 前置需求
+### 前置軟體
 
-- .NET 8 SDK
-- SQL Server LocalDB（或其他 SQL Server 執行個體）
+- [.NET 8 SDK](https://dotnet.microsoft.com/download)
+- SQL Server（或 SQL Server Express）
+- EF Core CLI：`dotnet tool install --global dotnet-ef`
+
+### 步驟
+
+```
+1. git clone https://github.com/ZE777/ReactL.api.git
+2. 將備份的 appsettings.Development.json 複製到 ReactL.api/ReactL.api/ReactL.api/
+3. 修改 DefaultConnection 的 Server 名稱為新機器的 SQL Server 執行個體
+4. cd ReactL.api/ReactL.api/ReactL.api
+5. dotnet restore
+6. dotnet ef database update   ← 建立資料庫並執行所有 Migration
+7. dotnet run
+```
+
+### 各設定的遷移方式
+
+| 設定項目 | 換機器要做什麼 |
+|----------|---------------|
+| `ConnectionStrings:DefaultConnection` | **必須修改** Server 名稱（每台機器不同） |
+| `JwtSettings:SecretKey` | 直接從備份複製，值相同（Token 才能跨部署解析） |
+| `EncryptionSettings:Key / Iv` | **必須完全相同**，否則舊 Bot Token 無法解密 |
+| AI Provider Keys（Groq/Mistral 等） | 直接從備份複製，Key 本身跨機器通用 |
+| `appsettings.json` | 不需處理，git pull 自動取得 |
+
+---
+
+## 快速開始（首次設定）
 
 ### 1. 還原相依套件
 
@@ -110,9 +149,9 @@ dotnet user-secrets set "AiSettings:Providers:3:ApiKey" "<sambanova-api-key>"
 dotnet restore
 ```
 
-### 2. 建立 appsettings.Development.json 並設定 User Secrets
+### 2. 建立並填寫 appsettings.Development.json
 
-參考上方「Clone 後需補齊的設定」章節。
+參考上方「appsettings.Development.json 完整結構」，建立檔案並填入所有值。
 
 ### 3. 建立資料庫
 
@@ -135,11 +174,17 @@ Swagger UI：`https://localhost:{port}/swagger`
 
 ```
 ReactL.api/
-├── Controllers/        # API 端點
-├── Services/           # 業務邏輯層
-├── Models/             # EF Core 實體
-├── DTOs/               # 請求 / 回應資料結構
-├── Data/               # DbContext 與工廠
+├── Controllers/
+│   ├── Admin/          # 後台登入使用者 API（Auth/Personas/Conversations 等）
+│   └── Web/            # 公開前台 API（SharedConversations/PublicChat 等）
+├── Services/           # 業務邏輯層，直接注入 AppDbContext
+├── Domain/             # 業務物件層，Service 回傳型別（不含敏感欄位）
+├── Models/             # EF Core Entity，唯一對應 SQL 資料表的位置
+├── DTOs/
+│   ├── Common/         # ApiResponse<T>、PagedResponse<T>
+│   ├── Requests/       # 前端輸入物件，含 DataAnnotations 驗證
+│   └── Responses/      # API 回傳合約，列表與詳情分開定義
+├── Data/               # AppDbContext 與工廠
 ├── Common/
 │   ├── Settings/       # 強型別設定類別
 │   ├── Exceptions/     # AppException 層級體系
@@ -150,11 +195,13 @@ ReactL.api/
 └── SqlScripts/         # 初始化 SQL 腳本
 ```
 
+**資料流向**：`Request DTO → Controller → Service（Entity → Domain）→ Controller（Domain → Response DTO）→ 前端`
+
 ---
 
 ## 安全性說明
 
-- 所有敏感設定（JWT Secret、API Key、AES Key）使用 **User Secrets** 或環境變數，不進版控
+- 所有敏感設定（JWT Secret、API Key、AES Key）集中於 **appsettings.Development.json**（已加入 .gitignore）或正式環境的環境變數，不進版控
 - `appsettings.Development.json` / `appsettings.Production.json` 已加入 `.gitignore`
 - Bot Token 與 Channel Secret 以 AES-256-CBC 加密後才儲存至資料庫
 - 登入錯誤回傳統一訊息，防止帳號列舉攻擊
