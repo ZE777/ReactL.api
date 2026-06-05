@@ -39,6 +39,11 @@ namespace ReactL.api.Controllers.Admin.BotBindings
                 IsEnabled = d.IsEnabled,
                 PersonaId = d.PersonaId,
                 PersonaName = d.PersonaName,
+                WebhookUrl = d.WebhookUrl,
+                WebhookBaseUrl = d.WebhookBaseUrl,
+                DiscordApplicationId = d.DiscordApplicationId,
+                DiscordPublicKey = d.DiscordPublicKey,
+                CredentialValid = d.CredentialValid,
                 CreatedAt = d.CreatedAt,
                 UpdatedAt = d.UpdatedAt
             }).ToList();
@@ -94,6 +99,15 @@ namespace ReactL.api.Controllers.Admin.BotBindings
             return Ok(ApiResponse<BotBindingDetailResponse>.Ok(result));
         }
 
+        /// <summary>查詢 LINE Bot 本月訊息用量（即時呼叫 LINE API，僅 LINE 平台有效）</summary>
+        [HttpGet("{id:guid}/line-quota")]
+        [ProducesResponseType(typeof(ApiResponse<LineQuotaResponse>), 200)]
+        public async Task<IActionResult> GetLineQuota(Guid id)
+        {
+            var result = await _service.GetLineQuotaAsync(id, User.GetUserId());
+            return Ok(ApiResponse<LineQuotaResponse>.Ok(result));
+        }
+
         // ── 私有輔助方法 ──────────────────────────────────────────────────────
 
         /// <summary>將 BotBinding Domain 轉換為詳情 Response DTO</summary>
@@ -108,6 +122,12 @@ namespace ReactL.api.Controllers.Admin.BotBindings
                 IsEnabled = d.IsEnabled,
                 PersonaId = d.PersonaId,
                 PersonaName = d.PersonaName,
+                WebhookUrl = d.WebhookUrl,
+                WebhookBaseUrl = d.WebhookBaseUrl,
+                DiscordApplicationId = d.DiscordApplicationId,
+                DiscordPublicKey = d.DiscordPublicKey,
+                CredentialValid = d.CredentialValid,
+                CredentialError = d.CredentialError,
                 CreatedAt = d.CreatedAt,
                 UpdatedAt = d.UpdatedAt
             };

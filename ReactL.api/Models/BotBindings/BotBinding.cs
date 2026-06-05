@@ -59,6 +59,31 @@ namespace ReactL.api.Models.BotBindings
         /// <remarks>bit · NOT NULL · DEFAULT 1</remarks>
         public bool IsEnabled { get; set; } = true;
 
+        /// <summary>
+        /// 此 Bot 專用的 Webhook 基礎 URL（例如 https://api.yourdomain.com）
+        /// null 表示沿用 AppSettings.BaseUrl 作為預設值
+        /// 多個 Bot 部署在不同伺服器時，各自填入不同網址互不干擾
+        /// </summary>
+        /// <remarks>nvarchar(500) · NULL</remarks>
+        public string? WebhookBaseUrl { get; set; }
+
+        /// <summary>Discord Application ID（Discord 平台專用）</summary>
+        /// <remarks>nvarchar(50) · NULL</remarks>
+        public string? DiscordApplicationId { get; set; }
+
+        /// <summary>Discord Application Public Key，用於 Ed25519 驗簽（Discord 平台專用）</summary>
+        /// <remarks>nvarchar(100) · NULL</remarks>
+        public string? DiscordPublicKey { get; set; }
+
+        /// <summary>
+        /// Bot 憑證/設定最近一次驗證是否通過（持久化，LINE 與 Discord 共用，供前端標示「設定無效」狀態）。
+        /// - Discord：/chat 指令註冊成功 = Token / Application ID 有效
+        /// - LINE：呼叫 GET /v2/bot/info 成功 = Channel Access Token 有效
+        /// true=有效、false=無效（需修正後重新儲存）、null=尚未驗證。
+        /// </summary>
+        /// <remarks>bit · NULL</remarks>
+        public bool? CredentialValid { get; set; }
+
         // ── 導航屬性 ──────────────────────────────────────────────────────
         public User User { get; set; } = null!;
         public Persona? Persona { get; set; }

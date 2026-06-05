@@ -27,6 +27,9 @@ namespace ReactL.api.Services.Monitor
             if (!string.IsNullOrWhiteSpace(query.Platform))
                 q = q.Where(em => em.Platform == query.Platform);
 
+            if (query.BotBindingId.HasValue)
+                q = q.Where(em => em.BotBindingId == query.BotBindingId.Value);
+
             if (query.From.HasValue)
                 q = q.Where(em => em.CreatedAt >= query.From.Value);
 
@@ -81,6 +84,9 @@ namespace ReactL.api.Services.Monitor
 
             if (!string.IsNullOrWhiteSpace(query.Platform))
                 q = q.Where(em => em.Platform == query.Platform);
+
+            if (query.BotBindingId.HasValue)
+                q = q.Where(em => em.BotBindingId == query.BotBindingId.Value);
 
             var grouped = q
                 .GroupBy(em => new

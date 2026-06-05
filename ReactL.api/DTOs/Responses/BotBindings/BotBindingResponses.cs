@@ -27,11 +27,45 @@ namespace ReactL.api.DTOs.Responses.BotBindings
         /// <summary>使用的 Persona 名稱（JOIN 取得）</summary>
         public string? PersonaName { get; set; }
 
+        /// <summary>組裝好的完整 Webhook URL，前端直接複製使用</summary>
+        public string WebhookUrl { get; set; } = string.Empty;
+
+        /// <summary>此 Bot 專用的 Webhook 基礎 URL；null 代表使用系統預設</summary>
+        public string? WebhookBaseUrl { get; set; }
+
+        /// <summary>Discord Application ID（Discord 平台專用）</summary>
+        public string? DiscordApplicationId { get; set; }
+
+        /// <summary>Discord Application Public Key（Discord 平台專用）</summary>
+        public string? DiscordPublicKey { get; set; }
+
+        /// <summary>
+        /// Bot 憑證/設定驗證結果（持久化，LINE/Discord 共用）：true=有效、false=無效、null=尚未驗證。
+        /// 前端依此在列表標示「設定無效」，重新整理後仍會顯示。
+        /// </summary>
+        public bool? CredentialValid { get; set; }
+
         /// <summary>Bot 綁定建立時間</summary>
         public DateTime CreatedAt { get; set; }
 
         /// <summary>Bot 綁定最後更新時間</summary>
         public DateTime UpdatedAt { get; set; }
+    }
+
+    /// <summary>LINE Bot 月訊息用量（來自 LINE Messaging API）</summary>
+    public class LineQuotaResponse
+    {
+        /// <summary>用量類型：limited（有上限）/ none（無限制方案）</summary>
+        public string QuotaType { get; set; } = string.Empty;
+
+        /// <summary>月用量上限；QuotaType = "none" 時為 null</summary>
+        public int? Limit { get; set; }
+
+        /// <summary>本月已送出訊息數</summary>
+        public int TotalUsage { get; set; }
+
+        /// <summary>本月剩餘量；QuotaType = "none" 時為 null</summary>
+        public int? Remaining { get; set; }
     }
 
     /// <summary>Bot 綁定詳情（同樣不回傳明文 Token）</summary>
@@ -60,6 +94,26 @@ namespace ReactL.api.DTOs.Responses.BotBindings
 
         /// <summary>使用的 Persona 名稱（JOIN 取得）</summary>
         public string? PersonaName { get; set; }
+
+        /// <summary>組裝好的完整 Webhook URL，前端直接複製使用</summary>
+        public string WebhookUrl { get; set; } = string.Empty;
+
+        /// <summary>此 Bot 專用的 Webhook 基礎 URL；null 代表使用系統預設</summary>
+        public string? WebhookBaseUrl { get; set; }
+
+        /// <summary>Discord Application ID（Discord 平台專用）</summary>
+        public string? DiscordApplicationId { get; set; }
+
+        /// <summary>Discord Application Public Key（Discord 平台專用）</summary>
+        public string? DiscordPublicKey { get; set; }
+
+        /// <summary>
+        /// Bot 憑證/設定驗證結果（持久化，LINE/Discord 共用）：true=有效、false=無效、null=尚未驗證。
+        /// </summary>
+        public bool? CredentialValid { get; set; }
+
+        /// <summary>憑證驗證失敗原因（人類可讀，不持久化），供前端 Modal 顯示</summary>
+        public string? CredentialError { get; set; }
 
         /// <summary>Bot 綁定建立時間</summary>
         public DateTime CreatedAt { get; set; }

@@ -153,7 +153,8 @@ namespace ReactL.api.Services.Webhooks
                     : systemPrompt;
 
                 // LINE 關閉 HTTP 連線後 cancellationToken 會被觸發，改用 None 讓 AI 呼叫持續到完成
-                (aiReply, tokensIn, tokensOut) = await _ai.CompleteWithUsageAsync(prompt, userText, CancellationToken.None);
+                // 以 Bot 擁有者的金鑰呼叫 AI（自帶 → 系統預設）
+                (aiReply, tokensIn, tokensOut) = await _ai.CompleteWithUsageAsync(prompt, userText, botUserId, CancellationToken.None);
             }
             catch (Exception ex)
             {

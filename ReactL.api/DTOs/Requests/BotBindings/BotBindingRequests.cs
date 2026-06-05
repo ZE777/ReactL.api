@@ -25,6 +25,19 @@ namespace ReactL.api.DTOs.Requests.BotBindings
         public string ModelType { get; set; } = string.Empty;
 
         public Guid? PersonaId { get; set; }
+
+        /// <summary>此 Bot 專用的 Webhook 基礎 URL（選填）；留空則使用系統預設 AppSettings.BaseUrl</summary>
+        [MaxLength(500)]
+        [Url(ErrorMessage = "Webhook 基礎 URL 格式不正確，需以 http:// 或 https:// 開頭")]
+        public string? WebhookBaseUrl { get; set; }
+
+        /// <summary>Discord Application ID（Discord 平台必填）</summary>
+        [MaxLength(50)]
+        public string? DiscordApplicationId { get; set; }
+
+        /// <summary>Discord Application Public Key（Discord 平台必填，用於 Ed25519 驗簽）</summary>
+        [MaxLength(100)]
+        public string? DiscordPublicKey { get; set; }
     }
 
     /// <summary>更新 Bot 綁定請求（不更新 Token，Token 另有端點更換）</summary>
@@ -40,6 +53,19 @@ namespace ReactL.api.DTOs.Requests.BotBindings
 
         public Guid? PersonaId { get; set; }
         public bool IsEnabled { get; set; }
+
+        /// <summary>此 Bot 專用的 Webhook 基礎 URL（選填）；null 清除並回復使用系統預設</summary>
+        [MaxLength(500)]
+        [Url(ErrorMessage = "Webhook 基礎 URL 格式不正確，需以 http:// 或 https:// 開頭")]
+        public string? WebhookBaseUrl { get; set; }
+
+        /// <summary>Discord Application ID（Discord 平台專用）</summary>
+        [MaxLength(50)]
+        public string? DiscordApplicationId { get; set; }
+
+        /// <summary>Discord Application Public Key（Discord 平台專用）</summary>
+        [MaxLength(100)]
+        public string? DiscordPublicKey { get; set; }
     }
 
     /// <summary>更換 Token 請求（單獨端點，避免每次更新設定都要重輸 Token）</summary>

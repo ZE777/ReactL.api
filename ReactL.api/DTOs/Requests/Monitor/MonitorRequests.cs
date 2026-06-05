@@ -6,6 +6,9 @@ namespace ReactL.api.DTOs.Requests.Monitor
         /// <summary>平台篩選：line / discord，null 表示全部</summary>
         public string? Platform { get; set; }
 
+        /// <summary>指定 Bot 綁定 ID，null 表示顯示該用戶所有 Bot</summary>
+        public Guid? BotBindingId { get; set; }
+
         /// <summary>開始時間（UTC）</summary>
         public DateTime? From { get; set; }
 
@@ -24,6 +27,9 @@ namespace ReactL.api.DTOs.Requests.Monitor
     {
         /// <summary>平台篩選：line / discord，null 表示全部</summary>
         public string? Platform { get; set; }
+
+        /// <summary>指定 Bot 綁定 ID，null 表示顯示該用戶所有 Bot</summary>
+        public Guid? BotBindingId { get; set; }
 
         public int Page { get; set; } = 1;
         public int PageSize { get; set; } = 30;

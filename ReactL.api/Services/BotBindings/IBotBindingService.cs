@@ -1,5 +1,6 @@
 using ReactL.api.Domain.BotBindings;
 using ReactL.api.DTOs.Requests.BotBindings;
+using ReactL.api.DTOs.Responses.BotBindings;
 
 namespace ReactL.api.Services.BotBindings
 {
@@ -23,5 +24,8 @@ namespace ReactL.api.Services.BotBindings
 
         /// <summary>更換 Bot Token（AES 重新加密後存回 DB）</summary>
         Task<BotBindingDomain> RotateTokenAsync(Guid id, Guid userId, RotateTokenRequest request);
+
+        /// <summary>查詢 LINE Bot 本月訊息用量（呼叫 LINE Messaging API）</summary>
+        Task<LineQuotaResponse> GetLineQuotaAsync(Guid id, Guid userId);
     }
 }
