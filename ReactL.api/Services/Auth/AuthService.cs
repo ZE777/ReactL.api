@@ -42,9 +42,9 @@ namespace ReactL.api.Services.Auth
 
             var user = new User
             {
-                Email = request.Email.ToLower(),
-                PasswordHash = BCrypt.Net.BCrypt.HashPassword(request.Password),
-                DisplayName = request.DisplayName,
+                Email = request.Email.Trim().ToLower(),
+                PasswordHash = BCrypt.Net.BCrypt.HashPassword(request.Password.Trim()),
+                DisplayName = request.DisplayName.Trim(),
                 Role = "User"
             };
 
@@ -60,9 +60,9 @@ namespace ReactL.api.Services.Auth
         {
             // 故意不區分「帳號不存在」與「密碼錯誤」，統一回傳相同訊息，防止帳號列舉攻擊
             var user = await _db.Users
-                .FirstOrDefaultAsync(u => u.Email == request.Email.ToLower());
+                .FirstOrDefaultAsync(u => u.Email == request.Email.Trim().ToLower());
 
-            if (user == null || !BCrypt.Net.BCrypt.Verify(request.Password, user.PasswordHash))
+            if (user == null || !BCrypt.Net.BCrypt.Verify(request.Password.Trim(), user.PasswordHash))
             {
                 _logger.LogWarning("登入失敗：帳號或密碼錯誤 Email={Email}", request.Email.ToLower());
                 throw new UnauthorizedException("帳號或密碼錯誤");

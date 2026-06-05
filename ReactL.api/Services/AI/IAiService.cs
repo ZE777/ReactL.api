@@ -26,14 +26,16 @@ namespace ReactL.api.Services.Ai
             CancellationToken cancellationToken);
 
         /// <summary>
-        /// 非串流單次呼叫，用於 AI 強化 Prompt（不需要 SSE）
+        /// 非串流單次呼叫，用於 AI 強化 Prompt（不需要 SSE）。
+        /// ownerUserId 為金鑰歸屬使用者，null 表示走系統預設金鑰。
         /// </summary>
-        Task<string> CompleteAsync(string systemPrompt, string userPrompt, CancellationToken cancellationToken = default);
+        Task<string> CompleteAsync(string systemPrompt, string userPrompt, Guid? ownerUserId = null, CancellationToken cancellationToken = default, bool allowSystemFallback = true);
 
         /// <summary>
-        /// 非串流單次呼叫，同時回傳 Token 用量，供 Webhook 等外部觸發場景寫入統計
+        /// 非串流單次呼叫，同時回傳 Token 用量，供 Webhook 等外部觸發場景寫入統計。
+        /// ownerUserId 為金鑰歸屬使用者（Webhook 傳 Bot 擁有者），null 表示走系統預設金鑰。
         /// </summary>
         Task<(string Reply, int TokensIn, int TokensOut)> CompleteWithUsageAsync(
-            string systemPrompt, string userPrompt, CancellationToken cancellationToken = default);
+            string systemPrompt, string userPrompt, Guid? ownerUserId = null, CancellationToken cancellationToken = default, bool allowSystemFallback = true);
     }
 }

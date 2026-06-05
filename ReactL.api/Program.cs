@@ -53,8 +53,6 @@ namespace ReactL.api
                 builder.Services.Configure<AppSettings>(builder.Configuration.GetSection("AppSettings"));
                 builder.Services.Configure<JwtSettings>(builder.Configuration.GetSection("JwtSettings"));
                 builder.Services.Configure<AiSettings>(builder.Configuration.GetSection("AiSettings"));
-                builder.Services.Configure<DiscordSettings>(builder.Configuration.GetSection("DiscordSettings"));
-                builder.Services.Configure<LineBotSettings>(builder.Configuration.GetSection("LineBotSettings"));
                 builder.Services.Configure<CorsSettings>(builder.Configuration.GetSection("CorsSettings"));
                 builder.Services.Configure<EncryptionSettings>(builder.Configuration.GetSection("EncryptionSettings"));
 
@@ -165,8 +163,12 @@ namespace ReactL.api
                 builder.Services.AddScoped<IBotBindingService, BotBindingService>();
                 builder.Services.AddScoped<IConversationService, ConversationService>();
                 builder.Services.AddScoped<IAiService, OpenAiService>();
+                builder.Services.AddScoped<IAiKeyService, AiKeyService>();
                 builder.Services.AddScoped<IMonitorService, MonitorService>();
                 builder.Services.AddScoped<ILineWebhookService, LineWebhookService>();
+                builder.Services.AddScoped<IDiscordWebhookService, DiscordWebhookService>();
+                builder.Services.AddScoped<IDiscordCommandService, DiscordCommandService>();
+                builder.Services.AddScoped<ILineCredentialService, LineCredentialService>();
 
                 // ── HttpClient（多 AI 提供商）─────────────────────────────────────────────
                 // 使用 IHttpClientFactory 管理 HttpClient 生命週期，避免 Socket 耗盡
@@ -222,6 +224,21 @@ namespace ReactL.api
 
                 app.MapHealthChecks("/health");
                 app.MapControllers();
+
+                // ── 啟動種子：將 appsettings 的 AI 預設 Key 加密寫入 DB（冪等）──────────
+                // 失敗（例如 AiKeys 表尚未建立）只記 Warning，不阻擋 API 啟動
+                using (var scope = app.Services.CreateScope())
+                {
+                    try
+                    {
+                        var aiKeySeeder = scope.ServiceProvider.GetRequiredService<IAiKeyService>();
+                        aiKeySeeder.SeedSystemKeysAsync(CancellationToken.None).GetAwaiter().GetResult();
+                    }
+                    catch (Exception seedEx)
+                    {
+                        Log.Warning(seedEx, "系統預設 AI Key 種子寫入失敗（可能 AiKeys 表尚未建立），略過");
+                    }
+                }
 
                 app.Run();
             }

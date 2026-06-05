@@ -24,17 +24,20 @@ namespace ReactL.api.Services.Ai
         private readonly AppDbContext _db;
         private readonly AiSettings _aiSettings;
         private readonly IHttpClientFactory _httpClientFactory;
+        private readonly IAiKeyService _aiKeys;
         private readonly ILogger<OpenAiService> _logger;
 
         public OpenAiService(
             AppDbContext db,
             IOptions<AiSettings> aiSettings,
             IHttpClientFactory httpClientFactory,
+            IAiKeyService aiKeys,
             ILogger<OpenAiService> logger)
         {
             _db = db;
             _aiSettings = aiSettings.Value;
             _httpClientFactory = httpClientFactory;
+            _aiKeys = aiKeys;
             _logger = logger;
         }
 
@@ -58,6 +61,16 @@ namespace ReactL.api.Services.Ai
             var providerDisplay = providerConfig?.DisplayName ?? providerId;
             // stream_options.include_usage 只有 Groq 等特定提供商支援，其他提供商傳此欄位會回傳 400
             var supportsStreamUsage = providerConfig?.SupportsStreamUsage ?? false;
+
+            // C 方案後端攔截：後台聊天必須使用使用者自帶金鑰，不 fallback 系統 key
+            // 在寫入任何訊息 / 呼叫 AI 前先擋下，避免白嫖系統額度
+            var authKey = await _aiKeys.ResolveKeyAsync(userId, providerId, allowSystemFallback: false, cancellationToken);
+            if (string.IsNullOrEmpty(authKey))
+            {
+                yield return new ChatStreamChunk { Type = "error", Content = $"你尚未設定 {providerDisplay} 的 API 金鑰，請至「AI 金鑰」頁面新增後再使用" };
+                yield break;
+            }
+
             var messages = BuildMessages(conversation, request.UserMessage);
 
             // C-05：對話開始前無任何訊息且標題為預設值，串流結束後自動產生標題
@@ -79,7 +92,7 @@ namespace ReactL.api.Services.Ai
             // 確保前端 invalidateQueries 觸發時 DB 已是最新狀態（含標題）
             ChatStreamChunk? doneChunk = null;
 
-            await foreach (var chunk in CallOpenAiStreamAsync(providerId, modelName, providerDisplay, messages, supportsStreamUsage, cancellationToken))
+            await foreach (var chunk in CallOpenAiStreamAsync(providerId, modelName, providerDisplay, messages, supportsStreamUsage, authKey, cancellationToken))
             {
                 if (chunk.Type == "delta" && chunk.Content != null)
                 {
@@ -158,7 +171,7 @@ namespace ReactL.api.Services.Ai
                     var titleUser = $"使用者訊息：{request.UserMessage}";
 
                     // OpenAiService 本身即 IAiService 實作，直接呼叫自身的 CompleteAsync
-                    var newTitle = (await CompleteAsync(titleSystem, titleUser))
+                    var newTitle = (await CompleteAsync(titleSystem, titleUser, userId))
                         .Trim().Trim('"').Trim('「').Trim('」');
 
                     if (!string.IsNullOrWhiteSpace(newTitle))
@@ -218,23 +231,30 @@ namespace ReactL.api.Services.Ai
 
             messages.Add(new { role = "user", content = request.UserMessage });
 
-            await foreach (var chunk in CallOpenAiStreamAsync(providerId, modelName, providerDisplay, messages, supportsStreamUsage, cancellationToken))
+            // 公開聊天室無登入使用者 → ownerUserId 為 null，允許走系統預設金鑰（前台不受 C 方案影響）
+            var authKey = await _aiKeys.ResolveKeyAsync(null, providerId, allowSystemFallback: true, cancellationToken);
+
+            await foreach (var chunk in CallOpenAiStreamAsync(providerId, modelName, providerDisplay, messages, supportsStreamUsage, authKey, cancellationToken))
                 yield return chunk;
         }
 
         public async Task<string> CompleteAsync(
             string systemPrompt,
             string userPrompt,
-            CancellationToken cancellationToken = default)
+            Guid? ownerUserId = null,
+            CancellationToken cancellationToken = default,
+            bool allowSystemFallback = true)
         {
-            var (reply, _, _) = await CompleteWithUsageAsync(systemPrompt, userPrompt, cancellationToken);
+            var (reply, _, _) = await CompleteWithUsageAsync(systemPrompt, userPrompt, ownerUserId, cancellationToken, allowSystemFallback);
             return reply;
         }
 
         public async Task<(string Reply, int TokensIn, int TokensOut)> CompleteWithUsageAsync(
             string systemPrompt,
             string userPrompt,
-            CancellationToken cancellationToken = default)
+            Guid? ownerUserId = null,
+            CancellationToken cancellationToken = default,
+            bool allowSystemFallback = true)
         {
             var (providerId, modelName) = ParseModelType(_aiSettings.DefaultModel);
             var messages = new[]
@@ -251,12 +271,16 @@ namespace ReactL.api.Services.Ai
                 stream = false
             };
 
+            var providerDisplay = ResolveProviderDisplay(providerId);
+            var authKey = await _aiKeys.ResolveKeyAsync(ownerUserId, providerId, allowSystemFallback, cancellationToken);
+            // 後端攔截：後台來源（allowSystemFallback=false）若無自帶金鑰，直接擋下而非借用系統 key
+            if (!allowSystemFallback && string.IsNullOrEmpty(authKey))
+                throw new ForbiddenException($"你尚未設定 {providerDisplay} 的 API 金鑰，請至「AI 金鑰」頁面新增後再使用");
             var client = _httpClientFactory.CreateClient($"ai:{providerId}");
-            var json = JsonSerializer.Serialize(body);
-            var content = new StringContent(json, Encoding.UTF8, "application/json");
 
-            var response = await client.PostAsync("chat/completions", content, cancellationToken);
-            response.EnsureSuccessStatusCode();
+            // 非串流呼叫加入自動重試（429/408/5xx/逾時/連線失敗），失敗時丟出帶友善訊息的例外
+            using var response = await PostChatCompletionWithRetryAsync(
+                client, providerId, providerDisplay, body, authKey, cancellationToken);
 
             var responseJson = await response.Content.ReadAsStringAsync(cancellationToken);
             using var doc = JsonDocument.Parse(responseJson);
@@ -280,6 +304,111 @@ namespace ReactL.api.Services.Ai
         }
 
         // ── 私有輔助方法 ──────────────────────────────────────────────────────
+
+        /// <summary>取得提供商顯示名稱，找不到時回傳 providerId 本身</summary>
+        private string ResolveProviderDisplay(string providerId) =>
+            _aiSettings.Providers.FirstOrDefault(p => p.Id == providerId)?.DisplayName ?? providerId;
+
+        /// <summary>可重試的狀態碼：429（限流）、408（請求逾時）、所有 5xx（伺服器端暫時性錯誤）</summary>
+        private static bool IsTransientStatus(int statusCode) =>
+            statusCode is 429 or 408 || statusCode >= 500;
+
+        /// <summary>將上游狀態碼對應為對使用者友善的中文訊息</summary>
+        private static string MapFriendlyMessage(int statusCode, string providerDisplay) => statusCode switch
+        {
+            401 => $"{providerDisplay} API Key 無效或已過期，請至設定頁更新 Key",
+            403 => $"沒有存取 {providerDisplay} 的權限，請確認帳號方案或 API Key 權限",
+            404 => $"{providerDisplay} 找不到指定的模型，請切換其他模型",
+            408 => $"{providerDisplay} 回應逾時，請稍後再試",
+            413 => $"內容過長，已超過 {providerDisplay} 的 token 上限，請縮短後再試",
+            429 => $"{providerDisplay} 目前請求過於頻繁（額度已達上限），請稍後再試或改用自己的 API Key",
+            >= 500 => $"{providerDisplay} 服務暫時不可用，請稍後再試",
+            _ => $"AI 服務暫時無法使用（{statusCode}）"
+        };
+
+        private static string Truncate(string s, int max) =>
+            string.IsNullOrEmpty(s) || s.Length <= max ? s : s[..max];
+
+        /// <summary>
+        /// 對 chat/completions 發送非串流請求，並對暫時性失敗自動重試（指數退避，尊重 Retry-After）。
+        /// 重試耗盡或遇到不可重試的 4xx 時，丟出 <see cref="UpstreamAiException"/>（攜帶友善訊息）。
+        /// </summary>
+        private async Task<HttpResponseMessage> PostChatCompletionWithRetryAsync(
+            HttpClient client,
+            string providerId,
+            string providerDisplay,
+            object body,
+            string? authKey,
+            CancellationToken cancellationToken)
+        {
+            var json = JsonSerializer.Serialize(body);
+            var maxAttempts = Math.Max(1, _aiSettings.MaxRetryCount);
+
+            for (var attempt = 1; ; attempt++)
+            {
+                int statusCode;
+                string friendly;
+                bool retryable;
+                TimeSpan? retryAfter = null;
+
+                try
+                {
+                    // StringContent 不可跨請求重用，每次 attempt 都重新建立
+                    var content = new StringContent(json, Encoding.UTF8);
+                    content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
+                    using var requestMessage = new HttpRequestMessage(HttpMethod.Post, "chat/completions") { Content = content };
+                    // 使用解析後的金鑰；request 層 header 優先於 HttpClient 啟動時設定的預設 Key
+                    if (!string.IsNullOrEmpty(authKey))
+                        requestMessage.Headers.Authorization = new AuthenticationHeaderValue("Bearer", authKey);
+
+                    var response = await client.SendAsync(requestMessage, cancellationToken);
+                    if (response.IsSuccessStatusCode)
+                        return response;
+
+                    statusCode = (int)response.StatusCode;
+                    var errorBody = await response.Content.ReadAsStringAsync(cancellationToken);
+                    retryAfter = response.Headers.RetryAfter?.Delta;
+                    response.Dispose();
+
+                    retryable = IsTransientStatus(statusCode);
+                    friendly = MapFriendlyMessage(statusCode, providerDisplay);
+                    _logger.LogWarning("{Provider} 非串流回傳 {StatusCode}（嘗試 {Attempt}/{Max}）：{Body}",
+                        providerId, statusCode, attempt, maxAttempts, Truncate(errorBody, 300));
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    // 用戶端主動取消，交給 ExceptionMiddleware 對應 499，不視為錯誤
+                    throw;
+                }
+                catch (TaskCanceledException)
+                {
+                    statusCode = 504;
+                    retryable = true;
+                    friendly = $"{providerDisplay} 回應逾時，請稍後再試";
+                    _logger.LogWarning("{Provider} 非串流請求逾時（嘗試 {Attempt}/{Max}）", providerId, attempt, maxAttempts);
+                }
+                catch (HttpRequestException ex)
+                {
+                    statusCode = 502;
+                    retryable = true;
+                    friendly = "AI 服務連線失敗，請稍後再試";
+                    _logger.LogWarning(ex, "{Provider} 非串流連線失敗（嘗試 {Attempt}/{Max}）", providerId, attempt, maxAttempts);
+                }
+
+                // 不可重試，或已是最後一次嘗試 → 丟出友善例外
+                if (!retryable || attempt >= maxAttempts)
+                {
+                    _logger.LogError("{Provider} 非串流呼叫最終失敗 StatusCode={StatusCode} 已嘗試 {Attempt} 次", providerId, statusCode, attempt);
+                    throw new UpstreamAiException(friendly);
+                }
+
+                // 退避：優先採用 Retry-After，否則指數退避（0.4s、0.8s、1.6s…）
+                var delay = retryAfter ?? TimeSpan.FromMilliseconds(400 * Math.Pow(2, attempt - 1));
+                _logger.LogInformation("{Provider} 將於 {DelayMs}ms 後重試（下一次 {Next}/{Max}）",
+                    providerId, (int)delay.TotalMilliseconds, attempt + 1, maxAttempts);
+                await Task.Delay(delay, cancellationToken);
+            }
+        }
 
         /// <summary>
         /// 解析 "providerId:modelId" 格式；舊格式或無冒號時 fallback 至 groq
@@ -315,6 +444,7 @@ namespace ReactL.api.Services.Ai
             string providerDisplay,
             List<object> messages,
             bool supportsStreamUsage,
+            string? authKey,
             [EnumeratorCancellation] CancellationToken cancellationToken)
         {
             // stream_options 只傳給支援的提供商，否則 Cerebras / SambaNova 等會回傳 400
@@ -333,9 +463,9 @@ namespace ReactL.api.Services.Ai
                 Content = requestContent
             };
 
-            // 確保每次請求都從 IOptions 取最新 Key，不依賴 HttpClient 啟動時的快照
-            if (_aiSettings.ProviderKeys.TryGetValue(providerId, out var providerKey) && !string.IsNullOrEmpty(providerKey))
-                requestMessage.Headers.Authorization = new AuthenticationHeaderValue("Bearer", providerKey);
+            // 使用解析後的金鑰（使用者自帶 → 系統預設 → appsettings）；request 層 header 優先於 HttpClient 預設
+            if (!string.IsNullOrEmpty(authKey))
+                requestMessage.Headers.Authorization = new AuthenticationHeaderValue("Bearer", authKey);
 
             // yield 不能在 catch 內使用，改用 bool 旗標與錯誤訊息傳遞到 yield 區段
             HttpResponseMessage? response = null;

@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using ReactL.api.Models.Ai;
 using ReactL.api.Models.Auth;
 using ReactL.api.Models.Base;
 using ReactL.api.Models.BotBindings;
@@ -33,6 +34,7 @@ namespace ReactL.api.Data
         public DbSet<Message> Messages => Set<Message>();
         public DbSet<ExternalMessage> ExternalMessages => Set<ExternalMessage>();
         public DbSet<TokenUsageStat> TokenUsageStats => Set<TokenUsageStat>();
+        public DbSet<AiKey> AiKeys => Set<AiKey>();
 
         protected override void OnModelCreating(ModelBuilder modelBuilder)
         {
@@ -63,14 +65,16 @@ namespace ReactL.api.Data
                 e.Property(p => p.Emoji).HasMaxLength(10);
                 e.Property(p => p.SystemPrompt).HasColumnType("nvarchar(max)").IsRequired();
                 e.Property(p => p.PromptSections).HasColumnType("nvarchar(max)");
+                e.Property(p => p.BuiltinGroup).HasMaxLength(50).IsRequired().HasDefaultValue("User");
                 e.HasIndex(p => p.UserId).HasDatabaseName("IX_Personas_UserId");
                 e.HasIndex(p => p.IsDeleted).HasDatabaseName("IX_Personas_IsDeleted");
 
-                // 刪除 User 時，Persona 的 UserId 設為 NULL（系統內建 Persona 本來就是 NULL，自訂 Persona 設為 NULL 保留記錄）
+                // NO ACTION：SQL Server 禁止 Users→Personas→Conversations 多重 cascade path
+                // 刪除使用者前需先在 application layer 清除其 Persona
                 e.HasOne(p => p.User)
                  .WithMany(u => u.Personas)
                  .HasForeignKey(p => p.UserId)
-                 .OnDelete(DeleteBehavior.SetNull);
+                 .OnDelete(DeleteBehavior.NoAction);
             });
 
             // ── PersonaVersions ───────────────────────────────────────────
@@ -113,6 +117,9 @@ namespace ReactL.api.Data
                 e.Property(b => b.ChannelSecretEncrypted).HasMaxLength(700);
                 e.Property(b => b.TokenLastFour).HasMaxLength(4).IsRequired();
                 e.Property(b => b.ModelType).HasMaxLength(50).IsRequired();
+                e.Property(b => b.WebhookBaseUrl).HasMaxLength(500);
+                e.Property(b => b.DiscordApplicationId).HasMaxLength(50);
+                e.Property(b => b.DiscordPublicKey).HasMaxLength(100);
                 e.HasIndex(b => b.UserId).HasDatabaseName("IX_BotBindings_UserId");
                 e.HasIndex(b => b.Platform).HasDatabaseName("IX_BotBindings_Platform");
 
@@ -190,6 +197,25 @@ namespace ReactL.api.Data
 
                 e.HasIndex(t => new { t.UserId, t.Date })
                  .HasDatabaseName("IX_TokenUsageStats_UserId_Date");
+            });
+
+            // ── AiKeys ────────────────────────────────────────────────────
+            modelBuilder.Entity<AiKey>(e =>
+            {
+                e.Property(k => k.ProviderId).HasMaxLength(50).IsRequired();
+                e.Property(k => k.EncryptedKey).HasMaxLength(700).IsRequired();
+                e.Property(k => k.KeyLastFour).HasMaxLength(8).IsRequired();
+
+                // 每位使用者在同一供應商最多一把 Key，供 UPSERT 與解析使用
+                e.HasIndex(k => new { k.UserId, k.ProviderId })
+                 .IsUnique()
+                 .HasDatabaseName("UX_AiKeys_UserId_ProviderId");
+
+                // 刪除使用者時連帶清除其金鑰（單一 cascade path，無多重路徑衝突）
+                e.HasOne(k => k.User)
+                 .WithMany()
+                 .HasForeignKey(k => k.UserId)
+                 .OnDelete(DeleteBehavior.Cascade);
             });
         }
 

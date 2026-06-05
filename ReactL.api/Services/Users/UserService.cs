@@ -46,7 +46,7 @@ namespace ReactL.api.Services.Users
             var user = await _db.Users.FindAsync(userId)
                 ?? throw new NotFoundException("User", userId);
 
-            user.DisplayName = request.DisplayName;
+            user.DisplayName = request.DisplayName.Trim();
             await _db.SaveChangesAsync();
 
             return new UserDomain
@@ -72,7 +72,7 @@ namespace ReactL.api.Services.Users
                 ?? throw new NotFoundException("User", userId);
 
             // 先驗證目前密碼，確認是本人操作
-            if (!BCrypt.Net.BCrypt.Verify(request.CurrentPassword, user.PasswordHash))
+            if (!BCrypt.Net.BCrypt.Verify(request.CurrentPassword.Trim(), user.PasswordHash))
             {
                 _logger.LogWarning("密碼修改失敗：目前密碼不正確 UserId={UserId}", userId);
                 throw new ValidationException(new Dictionary<string, string[]>
@@ -81,7 +81,7 @@ namespace ReactL.api.Services.Users
                 });
             }
 
-            user.PasswordHash = BCrypt.Net.BCrypt.HashPassword(request.NewPassword);
+            user.PasswordHash = BCrypt.Net.BCrypt.HashPassword(request.NewPassword.Trim());
             await _db.SaveChangesAsync();
 
             _logger.LogInformation("使用者密碼已修改 UserId={UserId}", userId);
