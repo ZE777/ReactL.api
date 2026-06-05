@@ -6,8 +6,11 @@ namespace ReactL.api.Domain.Personas
         /// <summary>Persona 唯一識別碼</summary>
         public Guid Id { get; set; }
 
-        /// <summary>null = 系統內建角色</summary>
-        public Guid? UserId { get; set; }
+        /// <summary>所屬使用者 ID，Official Persona 指向系統用戶</summary>
+        public Guid UserId { get; set; }
+
+        /// <summary>'Official' = 系統內建 | 'User' = 使用者自訂</summary>
+        public string BuiltinGroup { get; set; } = "User";
 
         /// <summary>Persona 顯示名稱</summary>
         public string Name { get; set; } = string.Empty;
@@ -24,7 +27,7 @@ namespace ReactL.api.Domain.Personas
         /// <summary>目前版本號，每次更新後遞增</summary>
         public int CurrentVersion { get; set; }
 
-        /// <summary>true = 系統內建，可顯示於前台，不可刪除</summary>
+        /// <summary>true = 開放前台訪客選用此角色</summary>
         public bool IsBuiltin { get; set; }
 
         /// <summary>Persona 建立時間</summary>

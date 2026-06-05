@@ -38,6 +38,6 @@ namespace ReactL.api.Services.Personas
         /// AI 強化 System Prompt（預覽用，不修改 DB）
         /// Request / Response 直接用 DTO 型別，因為是 AI 協議物件
         /// </summary>
-        Task<EnhancePromptResponse> EnhancePromptAsync(EnhancePromptRequest request);
+        Task<EnhancePromptResponse> EnhancePromptAsync(Guid userId, EnhancePromptRequest request);
     }
 }

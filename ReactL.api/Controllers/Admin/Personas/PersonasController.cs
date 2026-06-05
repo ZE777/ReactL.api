@@ -36,6 +36,7 @@ namespace ReactL.api.Controllers.Admin.Personas
                 Emoji = d.Emoji,
                 CurrentVersion = d.CurrentVersion,
                 IsBuiltin = d.IsBuiltin,
+                BuiltinGroup = d.BuiltinGroup,
                 UserId = d.UserId,
                 CreatedAt = d.CreatedAt,
                 UpdatedAt = d.UpdatedAt
@@ -149,7 +150,7 @@ namespace ReactL.api.Controllers.Admin.Personas
         public async Task<IActionResult> EnhancePrompt([FromBody] EnhancePromptRequest request)
         {
             // EnhancePrompt 直接使用 DTO 型別（不走 Domain），AI 協議物件不需轉換
-            var result = await _personaService.EnhancePromptAsync(request);
+            var result = await _personaService.EnhancePromptAsync(User.GetUserId(), request);
             return Ok(ApiResponse<EnhancePromptResponse>.Ok(result));
         }
 
@@ -166,6 +167,7 @@ namespace ReactL.api.Controllers.Admin.Personas
                 PromptSections = d.PromptSections,
                 CurrentVersion = d.CurrentVersion,
                 IsBuiltin = d.IsBuiltin,
+                BuiltinGroup = d.BuiltinGroup,
                 UserId = d.UserId,
                 CreatedAt = d.CreatedAt,
                 UpdatedAt = d.UpdatedAt

@@ -11,12 +11,17 @@ namespace ReactL.api.Models.Personas
     /// </summary>
     public class Persona : SoftDeletableEntity
     {
+        /// <summary>所屬使用者 ID，Official Persona 指向系統用戶</summary>
+        /// <remarks>uniqueidentifier · NOT NULL · FK → Users ON DELETE CASCADE</remarks>
+        public Guid UserId { get; set; }
+
         /// <summary>
-        /// 所屬使用者 ID，null 表示系統內建角色
-        /// 系統內建角色對所有使用者可見，不可刪除（IsBuiltin = true）
+        /// 角色來源分組，決定是否為系統內建角色
+        /// 'Official' = 系統內建（所有使用者可見，不可刪除）
+        /// 'User'     = 使用者自訂（僅本人可見）
         /// </summary>
-        /// <remarks>uniqueidentifier · NULL · FK → Users ON DELETE SET NULL</remarks>
-        public Guid? UserId { get; set; }
+        /// <remarks>nvarchar(50) · NOT NULL · DEFAULT 'User'</remarks>
+        public string BuiltinGroup { get; set; } = "User";
 
         /// <summary>角色名稱</summary>
         /// <remarks>nvarchar(100) · NOT NULL</remarks>

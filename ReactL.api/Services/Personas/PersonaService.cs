@@ -36,6 +36,7 @@ namespace ReactL.api.Services.Personas
                 {
                     Id = p.Id,
                     UserId = p.UserId,
+                    BuiltinGroup = p.BuiltinGroup,
                     Name = p.Name,
                     Emoji = p.Emoji,
                     SystemPrompt = p.SystemPrompt,
@@ -48,18 +49,19 @@ namespace ReactL.api.Services.Personas
                 .ToListAsync();
         }
 
-        /// <summary>回傳系統內建（UserId == null）+ 當前使用者自訂的 Persona</summary>
+        /// <summary>回傳系統內建（BuiltinGroup == "Official"）+ 當前使用者自訂的 Persona</summary>
         public async Task<List<PersonaDomain>> GetListAsync(Guid userId)
         {
             return await _db.Personas
                 .AsNoTracking()
-                .Where(p => p.UserId == null || p.UserId == userId)
-                .OrderBy(p => p.IsBuiltin ? 0 : 1)
+                .Where(p => p.BuiltinGroup == "Official" || p.UserId == userId)
+                .OrderBy(p => p.BuiltinGroup == "Official" ? 0 : 1)
                 .ThenBy(p => p.CreatedAt)
                 .Select(p => new PersonaDomain
                 {
                     Id = p.Id,
                     UserId = p.UserId,
+                    BuiltinGroup = p.BuiltinGroup,
                     Name = p.Name,
                     Emoji = p.Emoji,
                     SystemPrompt = p.SystemPrompt,
@@ -77,11 +79,12 @@ namespace ReactL.api.Services.Personas
         {
             var p = await _db.Personas
                 .AsNoTracking()
-                .Where(p => p.Id == id && (p.UserId == null || p.UserId == userId))
+                .Where(p => p.Id == id && (p.BuiltinGroup == "Official" || p.UserId == userId))
                 .Select(p => new PersonaDomain
                 {
                     Id = p.Id,
                     UserId = p.UserId,
+                    BuiltinGroup = p.BuiltinGroup,
                     Name = p.Name,
                     Emoji = p.Emoji,
                     SystemPrompt = p.SystemPrompt,
@@ -152,13 +155,12 @@ namespace ReactL.api.Services.Personas
             return await GetByIdAsync(id, userId);
         }
 
-        /// <summary>軟刪除 Persona，系統內建（UserId == null）不可刪除</summary>
+        /// <summary>軟刪除 Persona，系統內建（BuiltinGroup == "Official"）不可刪除</summary>
         public async Task DeleteAsync(Guid id, Guid userId)
         {
             var persona = await GetOwnedPersonaAsync(id, userId);
 
-            // 只有 UserId == null 的系統預設 Persona 不可刪除，使用者自訂但標為公開的仍可刪除
-            if (persona.IsBuiltin && persona.UserId == null)
+            if (persona.BuiltinGroup == "Official")
                 throw new ForbiddenException("系統內建 Persona 不可刪除");
 
             persona.IsDeleted = true;
@@ -247,7 +249,7 @@ namespace ReactL.api.Services.Personas
         /// AI 強化 System Prompt（預覽用，不修改 DB）
         /// 要求 AI 以 JSON 格式分別強化各區塊，方便前端逐一填入對應欄位
         /// </summary>
-        public async Task<EnhancePromptResponse> EnhancePromptAsync(EnhancePromptRequest request)
+        public async Task<EnhancePromptResponse> EnhancePromptAsync(Guid userId, EnhancePromptRequest request)
         {
             const string systemPrompt =
                 "你是一位 prompt engineering 專家，專門優化 AI 角色的 System Prompt 各區塊。" +
@@ -270,7 +272,8 @@ namespace ReactL.api.Services.Personas
                 sb.AppendLine($"\n強化方向：{request.Instruction}");
 
             _logger.LogInformation("開始 AI 強化 Prompt");
-            var rawJson = await _ai.CompleteAsync(systemPrompt, sb.ToString());
+            // C 方案後端攔截：以發起使用者的金鑰呼叫，不 fallback 系統 key（沒設定就擋下）
+            var rawJson = await _ai.CompleteAsync(systemPrompt, sb.ToString(), userId, allowSystemFallback: false);
 
             // 剝除 AI 可能包裹的 markdown code block（```json ... ```）
             var json = rawJson.Trim();
@@ -309,7 +312,7 @@ namespace ReactL.api.Services.Personas
             var persona = await _db.Personas.FindAsync(id)
                 ?? throw new NotFoundException("Persona", id);
 
-            // 系統內建（UserId == null）只能讀，不能寫
+            // Official Persona 屬於系統用戶，一般使用者無寫入權
             if (persona.UserId != userId)
                 throw new ForbiddenException("無權限操作此 Persona");
 

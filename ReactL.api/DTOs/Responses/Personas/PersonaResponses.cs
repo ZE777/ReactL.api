@@ -15,11 +15,14 @@ namespace ReactL.api.DTOs.Responses.Personas
         /// <summary>目前版本號</summary>
         public int CurrentVersion { get; set; }
 
-        /// <summary>是否為系統內建角色</summary>
+        /// <summary>是否開放前台訪客選用</summary>
         public bool IsBuiltin { get; set; }
 
-        /// <summary>所屬使用者 ID，null 表示系統內建</summary>
-        public Guid? UserId { get; set; }
+        /// <summary>'Official' = 系統內建 | 'User' = 使用者自訂</summary>
+        public string BuiltinGroup { get; set; } = "User";
+
+        /// <summary>所屬使用者 ID</summary>
+        public Guid UserId { get; set; }
 
         /// <summary>Persona 建立時間</summary>
         public DateTime CreatedAt { get; set; }
@@ -49,11 +52,14 @@ namespace ReactL.api.DTOs.Responses.Personas
         /// <summary>目前版本號</summary>
         public int CurrentVersion { get; set; }
 
-        /// <summary>是否為系統內建角色</summary>
+        /// <summary>是否開放前台訪客選用</summary>
         public bool IsBuiltin { get; set; }
 
-        /// <summary>所屬使用者 ID，null 表示系統內建</summary>
-        public Guid? UserId { get; set; }
+        /// <summary>'Official' = 系統內建 | 'User' = 使用者自訂</summary>
+        public string BuiltinGroup { get; set; } = "User";
+
+        /// <summary>所屬使用者 ID</summary>
+        public Guid UserId { get; set; }
 
         /// <summary>Persona 建立時間</summary>
         public DateTime CreatedAt { get; set; }
