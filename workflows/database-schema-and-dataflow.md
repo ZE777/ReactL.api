@@ -1,8 +1,9 @@
 # 資料庫結構與資料流動文件
 
-> 最後更新：2026-06-02
+> 最後更新：2026-06-05（V004–V007：BotBindings Webhook/Discord 欄位與憑證驗證、新增 AiKeys 混合 BYOK 表）
 > 資料庫：SQL Server（開發 LocalDB / 生產 SQL Server）
 > ORM：Entity Framework Core 8（Code First + Fluent API）
+> Schema 管理：**SqlScripts 版本化腳本**（EF Migration 已於 2026-06-05 移除，見 [§9](#9-schema-版本歷史sqlscripts)）
 
 ---
 
@@ -16,6 +17,7 @@
 6. [軟刪除設計](#6-軟刪除設計)
 7. [ER 關聯圖](#7-er-關聯圖)
 8. [資料流動流程](#8-資料流動流程)
+9. [Schema 版本歷史（SqlScripts）](#9-schema-版本歷史sqlscripts)
 
 ---
 
@@ -53,6 +55,7 @@ BaseEntity
 | PromptTemplates | SoftDeletableEntity | 使用者建立的 Prompt 模板庫 |
 | ExternalMessages | BaseEntity | LINE / Discord 外部 Bot 對話監控紀錄 |
 | TokenUsageStats | BaseEntity | 每日 Token 用量彙總（UPSERT 模式）|
+| AiKeys | AuditableEntity | AI 供應商金鑰，混合 BYOK（系統預設 + 使用者自帶）（V005 新增）|
 
 ---
 
@@ -83,13 +86,16 @@ BaseEntity
 | UpdatedAt | DateTime | NOT NULL | |
 | IsDeleted | bit | NOT NULL, DEFAULT 0 | 軟刪除 |
 | DeletedAt | DateTime | NULL | |
-| UserId | Guid | FK → Users, NULL | NULL = 系統內建角色 |
+| UserId | Guid | FK → Users, NOT NULL | Official Persona 指向系統用戶 |
 | Name | nvarchar(100) | NOT NULL | 角色名稱 |
 | Emoji | nvarchar(10) | NULL | 前台圖示，例如 🤖 |
 | SystemPrompt | nvarchar(max) | NOT NULL | 當前完整 System Prompt |
 | PromptSections | nvarchar(max) | NULL | Prompt Builder 各區塊 JSON |
 | CurrentVersion | int | NOT NULL, DEFAULT 1 | 對應最新 PersonaVersion.Version |
-| IsBuiltin | bit | NOT NULL, DEFAULT 0 | true = 系統內建，不可刪除 |
+| IsBuiltin | bit | NOT NULL, DEFAULT 0 | true = 開放前台訪客選用此角色 |
+| BuiltinGroup | nvarchar(50) | NOT NULL, DEFAULT 'User' | 'Official' = 系統內建 \| 'User' = 使用者自訂（V003 新增）|
+
+CHECK 約束：`BuiltinGroup IN ('Official', 'User')`
 
 `PromptSections` JSON 結構：
 ```json
@@ -176,6 +182,15 @@ BaseEntity
 | TokenLastFour | nvarchar(4) | NOT NULL | 後 4 碼，避免頻繁解密 |
 | ModelType | nvarchar(50) | NOT NULL | Bot 使用的 AI 模型 |
 | IsEnabled | bit | NOT NULL, DEFAULT 1 | false = 不回應 Webhook |
+| WebhookBaseUrl | nvarchar(500) | NULL | 每筆 Bot 專屬 Webhook 基礎網址（V004）|
+| DiscordApplicationId | nvarchar(50) | NULL | Discord 專用，多組 Bot 各自的 Application ID（V004）|
+| DiscordPublicKey | nvarchar(100) | NULL | Discord 專用，Ed25519 驗簽公鑰（V004）|
+| CredentialValid | bit | NULL | 憑證/設定驗證狀態：NULL=未驗證、1=有效、0=無效（V006→V007 一般化，LINE/Discord 共用）|
+
+**`CredentialValid` 語意**（V007 由 Discord 專用的 `DiscordCommandRegistered` 一般化而來）：
+- Discord：`/chat` Slash Command 自動註冊成功 = Token / Application ID 有效
+- LINE：呼叫 `GET /v2/bot/info` 成功 = Channel Access Token 有效
+- 持久化驗證結果，讓後台重新整理後仍能標示無效 Bot
 
 ---
 
@@ -207,6 +222,8 @@ BaseEntity
 | Platform | nvarchar(20) | NOT NULL | 冗餘欄位，加速 Monitor 頁篩選 |
 | ExternalUserId | nvarchar(200) | NOT NULL | LINE userId / Discord userId |
 | ExternalChannelId | nvarchar(200) | NULL | Discord 頻道 ID |
+| SenderName | nvarchar(200) | NULL | 外部使用者顯示名稱，取自 LINE / Discord Profile API（V002）|
+| SenderAvatarUrl | nvarchar(500) | NULL | 外部使用者頭像 URL（V002）|
 | Role | nvarchar(20) | NOT NULL | user / assistant |
 | Content | nvarchar(max) | NOT NULL | 訊息內容 |
 | TokensIn | int | NOT NULL, DEFAULT 0 | |
@@ -232,11 +249,33 @@ BaseEntity
 
 ---
 
+### AiKeys（V005）
+
+混合 BYOK：同一張表同時存放「系統預設 Key」與「使用者自帶 Key」。
+
+| 欄位 | 型別 | 限制 | 說明 |
+|------|------|------|------|
+| Id | Guid | PK | |
+| CreatedAt | DateTime | NOT NULL | |
+| UpdatedAt | DateTime | NOT NULL | |
+| UserId | Guid | FK → Users CASCADE | 系統預設 Key 指向系統用戶（`11111111-...`）|
+| ProviderId | nvarchar(50) | NOT NULL | 對應 `AiSettings.Providers[].Id`，例如 `groq` |
+| EncryptedKey | nvarchar(700) | NOT NULL | AES-256-CBC 密文（Base64）|
+| KeyLastFour | nvarchar(8) | NOT NULL | 金鑰後 4 碼，供前端顯示，避免逐筆解密 |
+| IsActive | bit | NOT NULL, DEFAULT 1 | false 時解析略過 |
+| IsSystem | bit | NOT NULL, DEFAULT 0 | 1 = 系統預設 Key（fallback 來源，不開放一般使用者管理）|
+
+複合唯一：`(UserId, ProviderId)`，每位使用者在同一供應商最多一把 Key。
+
+**金鑰解析順序**：使用者自帶 Key（`IsActive`）→ 系統預設 Key。系統預設 Key 由 API 啟動時的 seeder（`SeedSystemKeysAsync`）從 `appsettings` 的 `ProviderKeys` 經 `AesEncryptionHelper` 加密寫入（冪等）；公開聊天室與未自帶 Key 的使用者皆走系統預設。
+
+---
+
 ## 4. 關聯與外鍵行為
 
 | 父資料表 | 子資料表 | 外鍵欄位 | 刪除行為 | 說明 |
 |---------|---------|---------|---------|------|
-| Users | Personas | UserId | SET NULL | 刪除使用者，保留 Persona（UserId → NULL）|
+| Users | Personas | UserId | NO ACTION | 刪除使用者前需先清除其 Persona（application layer 處理）|
 | Personas | PersonaVersions | PersonaId | CASCADE | 刪除 Persona，版本全部清除 |
 | Users | PromptTemplates | UserId | CASCADE | 刪除使用者，模板一起刪 |
 | Users | BotBindings | UserId | CASCADE | 刪除使用者，Bot 一起刪 |
@@ -246,9 +285,10 @@ BaseEntity
 | Conversations | Messages | ConversationId | CASCADE | 刪除對話，訊息全部清除 |
 | BotBindings | ExternalMessages | BotBindingId | CASCADE | 刪除 Bot，外部訊息紀錄清除 |
 | Users | TokenUsageStats | UserId | CASCADE | 刪除使用者，統計一起刪 |
+| Users | AiKeys | UserId | CASCADE | 刪除使用者，金鑰一起刪（單一路徑，無多重 cascade 衝突）|
 
 **設計原則**：
-- 使用者生成的「創作內容」（Persona）刪除 User 時保留，以防誤刪
+- Users → Personas 改為 NO ACTION（V003）：SQL Server 禁止 Users→Personas→Conversations 形成多重 cascade path（Error 1785）
 - 訊息、統計等「衍生資料」跟隨父資料一起清除
 - Bot 綁定 Persona 是可選的，Persona 刪除後 Bot 仍可繼續運作（只是無角色）
 
@@ -270,6 +310,7 @@ BaseEntity
 | IX_ExternalMessages_ExternalUserId | ExternalMessages | ExternalUserId | 一般 | 查詢特定外部使用者紀錄 |
 | UX_TokenUsageStats | TokenUsageStats | (UserId, Date, ModelType, Source) | 複合唯一 | UPSERT 查找鍵 |
 | IX_TokenUsageStats_UserId_Date | TokenUsageStats | (UserId, Date) | 複合 | 日期範圍統計查詢 |
+| UX_AiKeys_UserId_ProviderId | AiKeys | (UserId, ProviderId) | 複合唯一 | 每人每供應商一把 Key，UPSERT 與解析用 |
 
 ---
 
@@ -342,9 +383,13 @@ BaseEntity
      │                   │ PromptTemplates │
      │                   └─────────────────┘
      │
-     └──────────────── ∞ ┌──────────────────┐
-                         │ TokenUsageStats  │
-                         └──────────────────┘
+     ├──────────────── ∞ ┌──────────────────┐
+     │                   │ TokenUsageStats  │
+     │                   └──────────────────┘
+     │
+     └──────────────── ∞ ┌──────────┐
+                         │  AiKeys  │  系統預設 Key 指向系統用戶
+                         └──────────┘
 ```
 
 ---
@@ -470,22 +515,30 @@ Rotate Token：
 
 ### 8-6. 外部 Bot 收到訊息（Webhook）
 
+端點為 `POST /webhooks/line/{botId}` 與 `POST /webhooks/discord/{botId}`（**不掛 `/api/v1` 前綴、免 JWT**，路由直接帶 botId）。
+
 ```
-LINE / Discord Webhook → POST /api/v1/webhooks/{platform}
+LINE / Discord Webhook → POST /webhooks/{platform}/{botId}
     │
     ▼
-依 platform + Channel Token 查詢 BotBindings
+Controller 以「原始 body bytes」驗簽（不可先讓框架解析）
+    │  LINE：HMAC-SHA256(rawBody, ChannelSecret) = X-Line-Signature
+    │  Discord：Ed25519 驗證 UTF8(timestamp + rawBody)，公鑰取自 BotBinding.DiscordPublicKey
+    │  驗簽失敗 → 401
+    ▼
+依 botId 查詢 BotBindings（驗證 IsEnabled = true）
     │
-    ├─ 驗證 IsEnabled = true
-    ├─ AesEncryptionHelper.Decrypt(BotTokenEncrypted)（驗證請求合法性）
     ├─ 讀取 Persona.SystemPrompt（若 PersonaId 不為 NULL）
     │
-    ├─ 呼叫 AiService.CompleteAsync（非串流）
+    ├─ 呼叫 AiService.CompleteWithUsageAsync（非串流 + 回傳 Token 用量）
+    │   金鑰以 Bot 擁有者（BotBinding.UserId）解析：自帶 → 系統預設
     │
-    ├─ INSERT ExternalMessages × 2（Role = "user" + "assistant"）
+    ├─ INSERT ExternalMessages × 2（Role = "user" + "assistant"，含 SenderName / SenderAvatarUrl）
     ├─ UPSERT TokenUsageStats（Source = "line" 或 "discord"）
     └─ 回傳 AI 回應給 LINE / Discord
 ```
+
+> Bot 憑證驗證狀態持久化於 `BotBinding.CredentialValid`：Discord `/chat` 指令註冊成功，或 LINE `GET /v2/bot/info` 回 200，即視為有效。
 
 ---
 
@@ -505,6 +558,26 @@ LINE / Discord Webhook → POST /api/v1/webhooks/{platform}
 ```
 
 統計頁讀取時依 `(UserId, Date)` 索引快速取得日期範圍資料，再依 ModelType / Source 分組。
+
+---
+
+## 9. Schema 版本歷史（SqlScripts）
+
+EF Core Migration 已於 2026-06-05 移除，schema 一律以版本化 SQL 腳本管理，依序套用：
+
+| 腳本 | 內容 |
+|------|------|
+| `Init/V001_CreateSchema.sql` | 初始全結構（Users、Personas、Conversations 等 9 張表）|
+| `Migrations/V002_AddSenderProfile.sql` | ExternalMessages 新增 `SenderName`、`SenderAvatarUrl` |
+| `Migrations/V003_AddPersonaBuiltinGroup.sql` | Personas 新增 `BuiltinGroup`，`UserId` 改 NOT NULL |
+| `Migrations/V004_AddBotBindingWebhookAndDiscordFields.sql` | BotBindings 新增 `WebhookBaseUrl`、`DiscordApplicationId`、`DiscordPublicKey` |
+| `Migrations/V005_CreateAiKeys.sql` | 新增 `AiKeys` 表（混合 BYOK）|
+| `Migrations/V006_AddBotBindingDiscordCommandRegistered.sql` | BotBindings 新增 `DiscordCommandRegistered` |
+| `Migrations/V007_GeneralizeBotCredentialValid.sql` | 將 `DiscordCommandRegistered` 一般化改名為 `CredentialValid`（LINE/Discord 共用）|
+| `Seed/Seed_OfficialPersonas.sql` | 官方內建 Persona 種子資料 |
+
+> 腳本皆以 `IF NOT EXISTS` / `COL_LENGTH` 等條件包裹，設計為**冪等**，重複執行不報錯。
+> 系統預設 AI Key 不在 V005 腳本種子，因金鑰需由 C# 的 `AesEncryptionHelper` 加密才相容，改由 API 啟動時的 seeder 寫入。
 
 ---
 

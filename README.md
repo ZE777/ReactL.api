@@ -10,8 +10,9 @@ ASP.NET Core 8 後端 API，提供 AI Prompt 管理、多輪對話、Persona 角
 |------|------|
 | 語言 / 執行環境 | C# 12 / .NET 8 |
 | Web 框架 | ASP.NET Core 8 (Controllers) |
-| ORM | Entity Framework Core 8 (Code First) |
-| 資料庫 | SQL Server (開發: LocalDB) |
+| ORM | Entity Framework Core 8（執行期 ORM，Code First 模型）|
+| Schema 管理 | **SqlScripts 版本化 SQL 腳本**（不使用 EF Migration）|
+| 資料庫 | SQL Server (開發: LocalDB / SQLEXPRESS) |
 | 認證 | JWT Bearer (HMAC-SHA256) |
 | 密碼雜湊 | BCrypt.Net-Next 4 |
 | 資料加密 | AES-256-CBC |
@@ -33,7 +34,9 @@ ASP.NET Core 8 後端 API，提供 AI Prompt 管理、多輪對話、Persona 角
 | `POST /api/v1/ai/chat` | SSE 串流 AI 回應、多 Provider 選擇 |
 | `CRUD /api/v1/prompttemplates` | Prompt 範本庫，支援分類與標籤 |
 | `CRUD /api/v1/botbindings` | LINE / Discord Bot 設定，Token AES 加密儲存 |
-| `GET /api/v1/monitor` | 監控外部 Bot 對話、Token 用量統計 |
+| `GET /api/v1/monitor` | 監控外部 Bot 對話、Token 用量統計（messages / conversations / stats/tokens）|
+| `GET/PUT/DELETE /api/v1/users/me/ai-keys` | 使用者 AI 金鑰管理（混合 BYOK：自帶 Key 覆蓋系統預設）|
+| `POST /webhooks/{line\|discord}/{botId}` | 外部平台 Webhook（免 JWT，平台簽章驗證；LINE HMAC-SHA256、Discord Ed25519）|
 
 ---
 
@@ -115,7 +118,7 @@ $buf = New-Object byte[] 16; $rng.GetBytes($buf)
 
 - [.NET 8 SDK](https://dotnet.microsoft.com/download)
 - SQL Server（或 SQL Server Express）
-- EF Core CLI：`dotnet tool install --global dotnet-ef`
+- SQL 用戶端工具（SSMS / Azure Data Studio / `sqlcmd`），用於執行 SqlScripts
 
 ### 步驟
 
@@ -125,7 +128,7 @@ $buf = New-Object byte[] 16; $rng.GetBytes($buf)
 3. 修改 DefaultConnection 的 Server 名稱為新機器的 SQL Server 執行個體
 4. cd ReactL.api/ReactL.api/ReactL.api
 5. dotnet restore
-6. dotnet ef database update   ← 建立資料庫並執行所有 Migration
+6. 依序執行 SqlScripts 建立資料庫（見下方「建立資料庫」）
 7. dotnet run
 ```
 
@@ -155,9 +158,18 @@ dotnet restore
 
 ### 3. 建立資料庫
 
-```bash
-dotnet ef database update
+Schema 以 `SqlScripts/` 下的版本化腳本管理（已移除 EF Migration）。在目標資料庫**依序**執行：
+
 ```
+SqlScripts/Init/V001_CreateSchema.sql        ← 初始全結構
+SqlScripts/Migrations/V002 … V007            ← 依編號順序執行的增量變更
+SqlScripts/Seed/Seed_OfficialPersonas.sql    ← 官方內建 Persona 種子
+```
+
+各腳本皆以 `IF NOT EXISTS` 等條件包裹，具**冪等性**，重複執行不會報錯。  
+系統預設 AI Key 不在腳本中，改由 API 首次啟動時的 seeder 從 `appsettings` 加密寫入。
+
+> 用 `sqlcmd` 範例：`sqlcmd -S 你的Server -d ReactL -i SqlScripts\Init\V001_CreateSchema.sql`
 
 ### 4. 啟動
 
@@ -175,24 +187,25 @@ Swagger UI：`https://localhost:{port}/swagger`
 ```
 ReactL.api/
 ├── Controllers/
-│   ├── Admin/          # 後台登入使用者 API（Auth/Personas/Conversations 等）
-│   └── Web/            # 公開前台 API（SharedConversations/PublicChat 等）
-├── Services/           # 業務邏輯層，直接注入 AppDbContext
+│   ├── Admin/          # 後台登入使用者 API（Auth/Personas/Conversations/AiKeys 等）
+│   ├── Web/            # 公開前台 API（SharedConversations/PublicChat 等）
+│   └── Webhooks/       # LINE / Discord 平台回呼（免 JWT，簽章驗證）
+├── Services/           # 業務邏輯層，直接注入 AppDbContext（含 AI / Webhooks）
 ├── Domain/             # 業務物件層，Service 回傳型別（不含敏感欄位）
 ├── Models/             # EF Core Entity，唯一對應 SQL 資料表的位置
 ├── DTOs/
 │   ├── Common/         # ApiResponse<T>、PagedResponse<T>
 │   ├── Requests/       # 前端輸入物件，含 DataAnnotations 驗證
 │   └── Responses/      # API 回傳合約，列表與詳情分開定義
-├── Data/               # AppDbContext 與工廠
+├── Data/               # AppDbContext（Entity 配置集中於 OnModelCreating）
 ├── Common/
 │   ├── Settings/       # 強型別設定類別
 │   ├── Exceptions/     # AppException 層級體系
 │   ├── Helpers/        # AES 加密工具
+│   ├── Constants/      # MessageRole / Platform / TokenSource / SystemUser
 │   └── Extensions/     # ClaimsPrincipal 擴充
 ├── Middleware/         # 全域例外處理
-├── Migrations/         # EF Core 遷移記錄
-└── SqlScripts/         # 初始化 SQL 腳本
+└── SqlScripts/         # 版本化 schema 腳本（Init / Migrations / Seed），取代 EF Migration
 ```
 
 **資料流向**：`Request DTO → Controller → Service（Entity → Domain）→ Controller（Domain → Response DTO）→ 前端`
