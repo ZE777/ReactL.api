@@ -21,6 +21,9 @@ namespace ReactL.api.DTOs.Responses.Personas
         /// <summary>'Official' = 系統內建 | 'User' = 使用者自訂</summary>
         public string BuiltinGroup { get; set; } = "User";
 
+        /// <summary>前台公開聊天使用此角色時的 AI 模型（格式 providerId:modelId）</summary>
+        public string ModelType { get; set; } = "groq:llama-3.3-70b-versatile";
+
         /// <summary>所屬使用者 ID</summary>
         public Guid UserId { get; set; }
 
@@ -57,6 +60,9 @@ namespace ReactL.api.DTOs.Responses.Personas
 
         /// <summary>'Official' = 系統內建 | 'User' = 使用者自訂</summary>
         public string BuiltinGroup { get; set; } = "User";
+
+        /// <summary>前台公開聊天使用此角色時的 AI 模型（格式 providerId:modelId）</summary>
+        public string ModelType { get; set; } = "groq:llama-3.3-70b-versatile";
 
         /// <summary>所屬使用者 ID</summary>
         public Guid UserId { get; set; }

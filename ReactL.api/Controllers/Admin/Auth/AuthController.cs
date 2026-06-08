@@ -38,7 +38,8 @@ namespace ReactL.api.Controllers.Admin.Auth
                     Id = domain.User.Id,
                     Email = domain.User.Email,
                     DisplayName = domain.User.DisplayName,
-                    Role = domain.User.Role
+                    Role = domain.User.Role,
+                    MustChangePassword = domain.User.MustChangePassword
                 }
             };
             return Ok(ApiResponse<AuthResponse>.Ok(result));
@@ -64,7 +65,8 @@ namespace ReactL.api.Controllers.Admin.Auth
                     Id = domain.User.Id,
                     Email = domain.User.Email,
                     DisplayName = domain.User.DisplayName,
-                    Role = domain.User.Role
+                    Role = domain.User.Role,
+                    MustChangePassword = domain.User.MustChangePassword
                 }
             };
             return Ok(ApiResponse<AuthResponse>.Ok(result));

@@ -27,5 +27,8 @@ namespace ReactL.api.DTOs.Responses.Auth
 
         /// <summary>角色：User / Admin</summary>
         public string Role { get; set; } = string.Empty;
+
+        /// <summary>是否必須變更密碼（種子 Admin 首登強制改密）</summary>
+        public bool MustChangePassword { get; set; }
     }
 }

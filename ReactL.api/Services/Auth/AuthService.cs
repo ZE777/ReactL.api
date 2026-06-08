@@ -99,6 +99,7 @@ namespace ReactL.api.Services.Auth
                     Role = user.Role,
                     IsActive = user.IsActive,
                     LastLoginAt = user.LastLoginAt,
+                    MustChangePassword = user.MustChangePassword,
                     CreatedAt = user.CreatedAt,
                     UpdatedAt = user.UpdatedAt
                 }

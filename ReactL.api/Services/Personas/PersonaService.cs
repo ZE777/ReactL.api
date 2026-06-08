@@ -43,6 +43,7 @@ namespace ReactL.api.Services.Personas
                     PromptSections = p.PromptSections,
                     CurrentVersion = p.CurrentVersion,
                     IsBuiltin = p.IsBuiltin,
+                    ModelType = p.ModelType,
                     CreatedAt = p.CreatedAt,
                     UpdatedAt = p.UpdatedAt
                 })
@@ -68,6 +69,7 @@ namespace ReactL.api.Services.Personas
                     PromptSections = p.PromptSections,
                     CurrentVersion = p.CurrentVersion,
                     IsBuiltin = p.IsBuiltin,
+                    ModelType = p.ModelType,
                     CreatedAt = p.CreatedAt,
                     UpdatedAt = p.UpdatedAt
                 })
@@ -91,6 +93,7 @@ namespace ReactL.api.Services.Personas
                     PromptSections = p.PromptSections,
                     CurrentVersion = p.CurrentVersion,
                     IsBuiltin = p.IsBuiltin,
+                    ModelType = p.ModelType,
                     CreatedAt = p.CreatedAt,
                     UpdatedAt = p.UpdatedAt
                 })
@@ -100,7 +103,7 @@ namespace ReactL.api.Services.Personas
         }
 
         /// <summary>建立新 Persona（同時建立初始版本快照）</summary>
-        public async Task<PersonaDomain> CreateAsync(Guid userId, CreatePersonaRequest request)
+        public async Task<PersonaDomain> CreateAsync(Guid userId, CreatePersonaRequest request, bool canSetModel)
         {
             var persona = new Persona
             {
@@ -110,8 +113,10 @@ namespace ReactL.api.Services.Personas
                 SystemPrompt = request.SystemPrompt,
                 PromptSections = request.PromptSections,
                 CurrentVersion = 1,
-                IsBuiltin = request.IsBuiltin
+                IsBuiltin = request.IsBuiltin,
             };
+            // 前台模型僅 Admin 可設定；非 Admin 沿用實體預設值
+            if (canSetModel) persona.ModelType = request.ModelType;
 
             _db.Personas.Add(persona);
 
@@ -130,7 +135,7 @@ namespace ReactL.api.Services.Personas
         }
 
         /// <summary>更新 Persona（先快照舊版本，再更新欄位，版本號遞增）</summary>
-        public async Task<PersonaDomain> UpdateAsync(Guid id, Guid userId, UpdatePersonaRequest request)
+        public async Task<PersonaDomain> UpdateAsync(Guid id, Guid userId, UpdatePersonaRequest request, bool canSetModel)
         {
             var persona = await GetOwnedPersonaAsync(id, userId);
 
@@ -149,6 +154,8 @@ namespace ReactL.api.Services.Personas
             persona.SystemPrompt = request.SystemPrompt;
             persona.PromptSections = request.PromptSections;
             persona.IsBuiltin = request.IsBuiltin;
+            // 前台模型僅 Admin 可變更；非 Admin 保留原值
+            if (canSetModel) persona.ModelType = request.ModelType;
             persona.CurrentVersion += 1;
 
             await _db.SaveChangesAsync();

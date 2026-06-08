@@ -180,6 +180,8 @@ dotnet run
 Swagger UI：`https://localhost:{port}/swagger`
 健康檢查：`https://localhost:{port}/health`
 
+> **首次啟動會自動建立預設 Admin**：當資料庫尚無任何 `Role=Admin` 帳號時，啟動種子（`AdminSeeder`）會依 `AdminSeedSettings` 建立一支 Admin（預設 `admin@reactl.local` / `Admin@12345`），並以系統預設 AI Key 自動綁定其金鑰，首次登入後會**強制改密**。正式環境請以 User Secrets / 環境變數覆蓋預設密碼；若不需要可將 `AdminSeedSettings:Enabled` 設為 `false`。詳見 `workflows/backend-tech-overview.md` 第 3 節。
+
 ---
 
 ## 專案結構
@@ -254,5 +256,6 @@ AES 加密解決的是「**靜態儲存**」風險（資料庫洩漏時攻擊者
 | `UnauthorizedException` | 401 |
 | `ForbiddenException` | 403 |
 | `ConflictException` | 409 |
+| `UpstreamAiException` | 503 |
 | 請求取消 | 499 |
 | 上游逾時 | 504 |

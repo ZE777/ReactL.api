@@ -12,5 +12,11 @@ namespace ReactL.api.Services.Webhooks
         /// <param name="botId">BotBinding 主鍵，從 URL 路由取得</param>
         /// <param name="payload">Discord Interactions API 解析後的請求物件</param>
         Task ProcessCommandAsync(Guid botId, DiscordInteractionPayload payload, CancellationToken cancellationToken);
+
+        /// <summary>
+        /// 處理 Discord MESSAGE_COMPONENT 互動（二次確認按鈕）：
+        /// 依 custom_id 執行或取消先前的待確認動作，並更新原訊息。
+        /// </summary>
+        Task ProcessComponentAsync(Guid botId, DiscordInteractionPayload payload, CancellationToken cancellationToken);
     }
 }

@@ -1,13 +1,17 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
+using ReactL.api.Common.Ai;
 using ReactL.api.Common.Constants;
 using ReactL.api.Common.Exceptions;
 using ReactL.api.Common.Settings;
 using ReactL.api.Data;
+using ReactL.api.DTOs.Ai;
 using ReactL.api.DTOs.Requests.Ai;
 using ReactL.api.DTOs.Responses.Ai;
 using ReactL.api.Models.Conversations;
 using ReactL.api.Models.Stats;
+using ReactL.api.Services.Access;
+using ReactL.api.Services.PublicChat;
 using System.Net.Http.Headers;
 using System.Runtime.CompilerServices;
 using System.Text;
@@ -25,6 +29,8 @@ namespace ReactL.api.Services.Ai
         private readonly AiSettings _aiSettings;
         private readonly IHttpClientFactory _httpClientFactory;
         private readonly IAiKeyService _aiKeys;
+        private readonly IAccessCodeService _accessCodes;
+        private readonly IPublicChatLogService _publicChatLogs;
         private readonly ILogger<OpenAiService> _logger;
 
         public OpenAiService(
@@ -32,12 +38,16 @@ namespace ReactL.api.Services.Ai
             IOptions<AiSettings> aiSettings,
             IHttpClientFactory httpClientFactory,
             IAiKeyService aiKeys,
+            IAccessCodeService accessCodes,
+            IPublicChatLogService publicChatLogs,
             ILogger<OpenAiService> logger)
         {
             _db = db;
             _aiSettings = aiSettings.Value;
             _httpClientFactory = httpClientFactory;
             _aiKeys = aiKeys;
+            _accessCodes = accessCodes;
+            _publicChatLogs = publicChatLogs;
             _logger = logger;
         }
 
@@ -203,20 +213,41 @@ namespace ReactL.api.Services.Ai
 
         public async IAsyncEnumerable<ChatStreamChunk> PublicChatStreamAsync(
             PublicChatRequest request,
+            string? accessCode,
+            string? sessionId,
             [EnumeratorCancellation] CancellationToken cancellationToken)
         {
-            // 取得 Persona 的 System Prompt（僅允許 isBuiltin=true 的公開角色）
-            string? systemPrompt = null;
-            if (request.PersonaId.HasValue)
+            // 存取碼閘門：驗證碼有效性 + 全域/每碼每日 token 配額；不通過則回單一 chunk 後結束
+            var gate = await _accessCodes.ValidateForChatAsync(accessCode, cancellationToken);
+            if (!gate.Allowed)
             {
-                systemPrompt = await _db.Personas
-                    .AsNoTracking()
-                    .Where(p => p.Id == request.PersonaId.Value && p.IsBuiltin)
-                    .Select(p => p.SystemPrompt)
-                    .FirstOrDefaultAsync(cancellationToken);
+                yield return new ChatStreamChunk { Type = gate.ChunkType, Content = gate.Message };
+                yield break;
             }
 
-            var (providerId, modelName) = ParseModelType(request.ModelType);
+            // 取得 Persona 的 System Prompt 與模型（僅允許 isBuiltin=true 的公開角色）
+            string? systemPrompt = null;
+            string? personaModel = null;
+            if (request.PersonaId.HasValue)
+            {
+                var persona = await _db.Personas
+                    .AsNoTracking()
+                    .Where(p => p.Id == request.PersonaId.Value && p.IsBuiltin)
+                    .Select(p => new { p.SystemPrompt, p.ModelType })
+                    .FirstOrDefaultAsync(cancellationToken);
+                systemPrompt = persona?.SystemPrompt;
+                personaModel = persona?.ModelType;
+            }
+
+            // 模型以角色設定為準（後端權威），角色未設定才退回請求帶入值
+            var effectiveModel = !string.IsNullOrWhiteSpace(personaModel) ? personaModel! : request.ModelType;
+
+            // 記錄使用者訊息（供後台 Admin 監控前台聊天）；best-effort，不影響回應
+            await _publicChatLogs.LogMessageAsync(
+                sessionId, gate.AccessCodeId, accessCode, "user", request.UserMessage,
+                effectiveModel, request.PersonaId, 0, 0, cancellationToken);
+
+            var (providerId, modelName) = ParseModelType(effectiveModel);
             var providerConfig = _aiSettings.Providers.FirstOrDefault(p => p.Id == providerId);
             var providerDisplay = providerConfig?.DisplayName ?? providerId;
             var supportsStreamUsage = providerConfig?.SupportsStreamUsage ?? false;
@@ -234,8 +265,34 @@ namespace ReactL.api.Services.Ai
             // 公開聊天室無登入使用者 → ownerUserId 為 null，允許走系統預設金鑰（前台不受 C 方案影響）
             var authKey = await _aiKeys.ResolveKeyAsync(null, providerId, allowSystemFallback: true, cancellationToken);
 
+            var tokensIn = 0;
+            var tokensOut = 0;
+            // 累積 AI 回應全文，串流結束後寫入監控記錄
+            var assistantContent = new StringBuilder();
             await foreach (var chunk in CallOpenAiStreamAsync(providerId, modelName, providerDisplay, messages, supportsStreamUsage, authKey, cancellationToken))
+            {
+                if (chunk.Type == "delta" && chunk.Content != null)
+                {
+                    assistantContent.Append(chunk.Content);
+                }
+                else if (chunk.Type == "done" && chunk.Usage != null)
+                {
+                    tokensIn = chunk.Usage.TokensIn;
+                    tokensOut = chunk.Usage.TokensOut;
+                }
                 yield return chunk;
+            }
+
+            // 串流結束後記錄用量（per-code 每日配額 + 全域系統用量）；best-effort，不影響回應
+            await _accessCodes.RecordUsageAsync(gate.AccessCodeId, effectiveModel, tokensIn, tokensOut, cancellationToken);
+
+            // 記錄 AI 回應（供後台 Admin 監控前台聊天）；best-effort，不影響回應
+            if (assistantContent.Length > 0)
+            {
+                await _publicChatLogs.LogMessageAsync(
+                    sessionId, gate.AccessCodeId, accessCode, "assistant", assistantContent.ToString(),
+                    effectiveModel, request.PersonaId, tokensIn, tokensOut, cancellationToken);
+            }
         }
 
         public async Task<string> CompleteAsync(
@@ -254,9 +311,12 @@ namespace ReactL.api.Services.Ai
             string userPrompt,
             Guid? ownerUserId = null,
             CancellationToken cancellationToken = default,
-            bool allowSystemFallback = true)
+            bool allowSystemFallback = true,
+            string? modelType = null)
         {
-            var (providerId, modelName) = ParseModelType(_aiSettings.DefaultModel);
+            // 傳入 modelType（如 LINE Bot 的設定模型）則用之；否則用系統預設模型
+            var (providerId, modelName) = ParseModelType(
+                string.IsNullOrWhiteSpace(modelType) ? _aiSettings.DefaultModel : modelType);
             var messages = new[]
             {
                 new { role = "system", content = systemPrompt },
@@ -303,31 +363,96 @@ namespace ReactL.api.Services.Ai
             return (reply, tokensIn, tokensOut);
         }
 
+        public async Task<AiToolResult> CompleteWithToolsAsync(
+            string systemPrompt,
+            string userPrompt,
+            IReadOnlyList<AiFunctionTool> tools,
+            string modelType,
+            Guid? ownerUserId = null,
+            CancellationToken cancellationToken = default,
+            bool allowSystemFallback = true)
+        {
+            var (providerId, modelName) = ParseModelType(modelType);
+            var messages = new[]
+            {
+                new { role = "system", content = systemPrompt },
+                new { role = "user", content = userPrompt }
+            };
+
+            // 包成 OpenAI tools 格式
+            var toolsPayload = tools.Select(t => new
+            {
+                type = "function",
+                function = new { name = t.Name, description = t.Description, parameters = t.Parameters }
+            }).ToArray();
+
+            // Discord 工具路徑用獨立的較小上限（AiSettings.ToolCallMaxTokens，預設 2048）：
+            // 該路徑常用 TPM 較低的小模型，且 Discord 訊息會截斷，較小值可避免請求超過 TPM 而 413。
+            var body = new
+            {
+                model = modelName,
+                messages,
+                tools = toolsPayload,
+                tool_choice = "auto",
+                max_tokens = _aiSettings.ToolCallMaxTokens,
+                stream = false
+            };
+
+            var providerDisplay = ResolveProviderDisplay(providerId);
+            var authKey = await _aiKeys.ResolveKeyAsync(ownerUserId, providerId, allowSystemFallback, cancellationToken);
+            if (!allowSystemFallback && string.IsNullOrEmpty(authKey))
+                throw new ForbiddenException($"你尚未設定 {providerDisplay} 的 API 金鑰，請至「AI 金鑰」頁面新增後再使用");
+            var client = _httpClientFactory.CreateClient($"ai:{providerId}");
+
+            using var response = await PostChatCompletionWithRetryAsync(
+                client, providerId, providerDisplay, body, authKey, cancellationToken);
+
+            var responseJson = await response.Content.ReadAsStringAsync(cancellationToken);
+            using var doc = JsonDocument.Parse(responseJson);
+            var root = doc.RootElement;
+            var message = root.GetProperty("choices")[0].GetProperty("message");
+
+            var result = new AiToolResult();
+
+            // 有 tool_calls 代表模型決定呼叫工具；否則取純文字 content
+            if (message.TryGetProperty("tool_calls", out var toolCalls)
+                && toolCalls.ValueKind == JsonValueKind.Array && toolCalls.GetArrayLength() > 0)
+            {
+                foreach (var call in toolCalls.EnumerateArray())
+                {
+                    if (!call.TryGetProperty("function", out var fn)) continue;
+                    result.ToolCalls.Add(new AiToolCall
+                    {
+                        Name = fn.TryGetProperty("name", out var n) ? (n.GetString() ?? string.Empty) : string.Empty,
+                        ArgumentsJson = fn.TryGetProperty("arguments", out var a) ? (a.GetString() ?? "{}") : "{}"
+                    });
+                }
+            }
+            else
+            {
+                result.TextReply = message.TryGetProperty("content", out var c) ? c.GetString() : null;
+            }
+
+            if (root.TryGetProperty("usage", out var usage))
+            {
+                if (usage.TryGetProperty("prompt_tokens", out var pt)) result.TokensIn = pt.GetInt32();
+                if (usage.TryGetProperty("completion_tokens", out var ct)) result.TokensOut = ct.GetInt32();
+            }
+
+            return result;
+        }
+
         // ── 私有輔助方法 ──────────────────────────────────────────────────────
 
         /// <summary>取得提供商顯示名稱，找不到時回傳 providerId 本身</summary>
         private string ResolveProviderDisplay(string providerId) =>
             _aiSettings.Providers.FirstOrDefault(p => p.Id == providerId)?.DisplayName ?? providerId;
 
-        /// <summary>可重試的狀態碼：429（限流）、408（請求逾時）、所有 5xx（伺服器端暫時性錯誤）</summary>
-        private static bool IsTransientStatus(int statusCode) =>
-            statusCode is 429 or 408 || statusCode >= 500;
-
-        /// <summary>將上游狀態碼對應為對使用者友善的中文訊息</summary>
-        private static string MapFriendlyMessage(int statusCode, string providerDisplay) => statusCode switch
-        {
-            401 => $"{providerDisplay} API Key 無效或已過期，請至設定頁更新 Key",
-            403 => $"沒有存取 {providerDisplay} 的權限，請確認帳號方案或 API Key 權限",
-            404 => $"{providerDisplay} 找不到指定的模型，請切換其他模型",
-            408 => $"{providerDisplay} 回應逾時，請稍後再試",
-            413 => $"內容過長，已超過 {providerDisplay} 的 token 上限，請縮短後再試",
-            429 => $"{providerDisplay} 目前請求過於頻繁（額度已達上限），請稍後再試或改用自己的 API Key",
-            >= 500 => $"{providerDisplay} 服務暫時不可用，請稍後再試",
-            _ => $"AI 服務暫時無法使用（{statusCode}）"
-        };
-
         private static string Truncate(string s, int max) =>
             string.IsNullOrEmpty(s) || s.Length <= max ? s : s[..max];
+
+        /// <summary>重試等待上限；超過此值的 Retry-After（如每日額度）視為不值得等，直接快速失敗</summary>
+        private static readonly TimeSpan MaxRetryDelay = TimeSpan.FromSeconds(10);
 
         /// <summary>
         /// 對 chat/completions 發送非串流請求，並對暫時性失敗自動重試（指數退避，尊重 Retry-After）。
@@ -347,7 +472,7 @@ namespace ReactL.api.Services.Ai
             for (var attempt = 1; ; attempt++)
             {
                 int statusCode;
-                string friendly;
+                AiError aiError;
                 bool retryable;
                 TimeSpan? retryAfter = null;
 
@@ -370,8 +495,20 @@ namespace ReactL.api.Services.Ai
                     retryAfter = response.Headers.RetryAfter?.Delta;
                     response.Dispose();
 
-                    retryable = IsTransientStatus(statusCode);
-                    friendly = MapFriendlyMessage(statusCode, providerDisplay);
+                    // error code 有助於辨識「模型下架」等狀況
+                    string? errorCode = null;
+                    try
+                    {
+                        using var doc = JsonDocument.Parse(errorBody);
+                        var rootEl = doc.RootElement;
+                        errorCode = rootEl.TryGetProperty("error", out var errEl)
+                            ? (errEl.TryGetProperty("code", out var c) ? c.GetString() : null)
+                            : (rootEl.TryGetProperty("code", out var c2) ? c2.GetString() : null);
+                    }
+                    catch { /* 非 JSON 格式不處理 */ }
+
+                    aiError = AiErrorClassifier.Classify(statusCode, providerDisplay, errorCode);
+                    retryable = aiError.Retryable;
                     _logger.LogWarning("{Provider} 非串流回傳 {StatusCode}（嘗試 {Attempt}/{Max}）：{Body}",
                         providerId, statusCode, attempt, maxAttempts, Truncate(errorBody, 300));
                 }
@@ -383,15 +520,15 @@ namespace ReactL.api.Services.Ai
                 catch (TaskCanceledException)
                 {
                     statusCode = 504;
+                    aiError = AiErrorClassifier.Timeout(providerDisplay);
                     retryable = true;
-                    friendly = $"{providerDisplay} 回應逾時，請稍後再試";
                     _logger.LogWarning("{Provider} 非串流請求逾時（嘗試 {Attempt}/{Max}）", providerId, attempt, maxAttempts);
                 }
                 catch (HttpRequestException ex)
                 {
                     statusCode = 502;
+                    aiError = AiErrorClassifier.Network();
                     retryable = true;
-                    friendly = "AI 服務連線失敗，請稍後再試";
                     _logger.LogWarning(ex, "{Provider} 非串流連線失敗（嘗試 {Attempt}/{Max}）", providerId, attempt, maxAttempts);
                 }
 
@@ -399,11 +536,21 @@ namespace ReactL.api.Services.Ai
                 if (!retryable || attempt >= maxAttempts)
                 {
                     _logger.LogError("{Provider} 非串流呼叫最終失敗 StatusCode={StatusCode} 已嘗試 {Attempt} 次", providerId, statusCode, attempt);
-                    throw new UpstreamAiException(friendly);
+                    throw new UpstreamAiException(aiError);
                 }
 
                 // 退避：優先採用 Retry-After，否則指數退避（0.4s、0.8s、1.6s…）
                 var delay = retryAfter ?? TimeSpan.FromMilliseconds(400 * Math.Pow(2, attempt - 1));
+
+                // Retry-After 過長（如每日額度可能要等數十分鐘）→ 重試無意義，且會拖過
+                // Discord 互動 15 分鐘時限導致「思考中」卡死。直接快速失敗回報友善訊息。
+                if (delay > MaxRetryDelay)
+                {
+                    _logger.LogWarning("{Provider} Retry-After {DelaySec}s 過長，放棄重試直接回報（{StatusCode}）",
+                        providerId, (int)delay.TotalSeconds, statusCode);
+                    throw new UpstreamAiException(aiError);
+                }
+
                 _logger.LogInformation("{Provider} 將於 {DelayMs}ms 後重試（下一次 {Next}/{Max}）",
                     providerId, (int)delay.TotalMilliseconds, attempt + 1, maxAttempts);
                 await Task.Delay(delay, cancellationToken);
@@ -467,11 +614,10 @@ namespace ReactL.api.Services.Ai
             if (!string.IsNullOrEmpty(authKey))
                 requestMessage.Headers.Authorization = new AuthenticationHeaderValue("Bearer", authKey);
 
-            // yield 不能在 catch 內使用，改用 bool 旗標與錯誤訊息傳遞到 yield 區段
+            // yield 不能在 catch 內使用，改用旗標與分類結果傳遞到 yield 區段
             HttpResponseMessage? response = null;
             Exception? callError = null;
-            string? friendlyError = null;
-            bool isRateLimit = false;
+            AiError? aiError = null;
 
             try
             {
@@ -497,23 +643,7 @@ namespace ReactL.api.Services.Ai
                     }
                     catch { /* 非 JSON 格式不處理 */ }
 
-                    friendlyError = statusCode switch
-                    {
-                        401 => $"{providerDisplay} API Key 無效或已過期，請至設定頁更新 Key",
-                        403 => $"沒有存取 {providerDisplay} 的權限，請確認帳號方案或 API Key 權限",
-                        404 => $"{providerDisplay} 找不到指定的模型，請切換其他模型",
-                        413 => $"此對話的訊息累積過長，已超過 {providerDisplay} 的 token 上限，請開新對話繼續",
-                        429 => null, // 由 isRateLimit 處理
-                        500 or 502 => $"{providerDisplay} 服務發生內部錯誤，請稍後再試",
-                        503 => $"{providerDisplay} 服務暫時不可用，請稍後再試",
-                        _ when errorCode is "model_decommissioned" or "model_not_found" =>
-                            $"{providerDisplay} 的模型已下架或不存在，請切換其他模型",
-                        _ => $"AI 服務暫時無法使用（{statusCode}）"
-                    };
-
-                    if (statusCode == 429)
-                        isRateLimit = true;
-
+                    aiError = AiErrorClassifier.Classify(statusCode, providerDisplay, errorCode);
                     callError = new HttpRequestException($"HTTP {statusCode}");
                 }
             }
@@ -521,22 +651,21 @@ namespace ReactL.api.Services.Ai
             {
                 // 超時：timeout 比一般 OperationCanceledException 更常見且有明確意義
                 _logger.LogWarning("{Provider} API 請求逾時", providerId);
-                friendlyError = $"{providerDisplay} 回應逾時，請稍後再試或切換其他模型";
+                aiError = AiErrorClassifier.Timeout(providerDisplay);
                 callError = new TimeoutException();
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 _logger.LogError(ex, "{Provider} API 呼叫失敗", providerId);
-                friendlyError = "網路連線失敗，請確認網路狀態後再試";
+                aiError = AiErrorClassifier.Network();
                 callError = ex;
             }
 
             if (callError != null)
             {
-                if (isRateLimit)
-                    yield return new ChatStreamChunk { Type = "rate_limit", Content = $"{providerDisplay} 免費額度已達上限，請稍後再試或切換其他模型" };
-                else
-                    yield return new ChatStreamChunk { Type = "error", Content = friendlyError ?? "AI 服務暫時無法使用" };
+                // 限流 → rate_limit chunk；其餘 → error chunk（分類由 AiErrorClassifier 統一決定）
+                var e = aiError ?? AiErrorClassifier.Network();
+                yield return new ChatStreamChunk { Type = e.ChunkType, Content = e.FriendlyMessage };
                 yield break;
             }
 

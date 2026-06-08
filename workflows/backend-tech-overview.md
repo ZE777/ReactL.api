@@ -180,6 +180,42 @@ public class JwtSettings {
 - `GetRole()` → string
 - `IsAdmin()` → bool
 
+### 啟動種子：Admin 帳號與 AI 金鑰自動綁定（`Services/Auth/AdminSeeder.cs`）
+
+API **每次啟動**時會在 `Program.cs` 開一個 Scope 依序執行兩支種子（皆冪等、失敗只記 Warning 不阻擋啟動）：
+
+1. `IAiKeyService.SeedSystemKeysAsync` — 將 `appsettings` 的 AI 預設 Key 加密寫入系統用戶（`IsSystem = true`）。
+2. `IAdminSeeder.SeedAsync` — 在資料庫**尚無任何 `Role = "Admin"` 帳號時**自動建立一支預設 Admin，並以系統預設 Key 自動綁定其 AI 金鑰。
+
+> 順序不可顛倒：Admin 的 AI 金鑰是複製系統預設 Key，必須在系統 Key 種子之後執行。
+
+**`AdminSeeder.SeedAsync` 行為**：
+
+| 條件 | 行為 |
+|------|------|
+| `AdminSeedSettings.Enabled = false` | 直接略過，不建立 |
+| 已存在任一 `Role = "Admin"` 帳號 | 略過，不重複種子 |
+| 設定的 Email 已被其他帳號佔用 | **不覆寫**，僅記 Warning 提示手動將該帳號改為 Admin |
+| 以上皆否 | 建立 Admin（`IsActive = true`、`MustChangePassword = true`），密碼以 BCrypt 雜湊 |
+
+- 建立的 Admin 帶 `MustChangePassword = true`，**首次登入後強制改密**（預設密碼僅供首登）。
+- 建立成功後立即呼叫私有的 `GrantSystemKeysToUserAsync`：
+  - 撈出所有啟用中的系統預設 Key（`UserId = SystemUser.Id`、`IsSystem`、`IsActive`）。
+  - 逐一以 `IsSystem = false` 複製綁定到 Admin（**直接重用系統 Key 的 AES 密文**，同一把金鑰、無需重新加密）。
+  - 冪等：Admin 同供應商已存在金鑰則略過；若當下尚無任何系統 Key 則記 Warning 略過。
+  - 目的：避免新 Admin 首登時因「尚未設定金鑰」被鎖在 AI 金鑰頁，開箱即可使用 AI 功能。
+
+**設定（`Common/Settings/AdminSeedSettings.cs`，對應 `appsettings` 的 `AdminSeedSettings` section）**：
+
+| 欄位 | 預設值 | 說明 |
+|------|--------|------|
+| `Enabled` | `true` | 是否啟用自動種子 Admin |
+| `Email` | `admin@reactl.local` | 種子 Admin 登入 Email（儲存前 `Trim().ToLower()`）|
+| `DefaultPassword` | `Admin@12345` | 預設密碼，**首登後強制變更** |
+| `DisplayName` | `管理員` | 顯示名稱 |
+
+> ⚠️ `DefaultPassword` 為敏感資訊，正式環境請以 User Secrets / 環境變數覆蓋，切勿沿用預設值。
+
 ---
 
 ## 4. 資料庫設計
@@ -328,9 +364,11 @@ public interface IAiService {
         CancellationToken cancellationToken = default, bool allowSystemFallback = true);
 
     // 非串流 + 回傳 Token 用量（供 Webhook 等外部觸發寫入統計）
+    // modelType 傳入則用該模型（如 LINE Bot 設定的模型）；null = 系統預設模型
     Task<(string Reply, int TokensIn, int TokensOut)> CompleteWithUsageAsync(
         string systemPrompt, string userPrompt, Guid? ownerUserId = null,
-        CancellationToken cancellationToken = default, bool allowSystemFallback = true);
+        CancellationToken cancellationToken = default, bool allowSystemFallback = true,
+        string? modelType = null);
 }
 ```
 
@@ -352,6 +390,19 @@ public interface IAiService {
 - 邊串流邊累積完整回應，完成後寫入 DB
 - `IHttpClientFactory` 命名 Client（`ai:{providerId}`），避免 Socket 耗盡
 - `SupportsStreamUsage` 旗標：部分提供商支援 `stream_options.include_usage`
+
+### AI 錯誤處理共通化（`Common/Ai/AiError.cs`）
+
+所有「狀態碼／例外 → 友善訊息」對應**集中於 `AiErrorClassifier`（單一事實來源）**，串流與非串流、四個載體共用：
+
+- `AiErrorClassifier.Classify(statusCode, providerDisplay, errorCode?)` → `AiError`（含 `Kind`/`FriendlyMessage`/`Retryable`，衍生 `ChunkType`：限流→`rate_limit`，其餘→`error`）。
+- **串流**（`CallOpenAiStreamAsync`，前台公開聊天 + 後台聊天室）：依 `ChunkType` 回 SSE chunk。
+- **非串流**（`PostChatCompletionWithRetryAsync`）：丟 `UpstreamAiException(aiError)`，攜帶 `Kind`/`ChunkType`。
+- **LINE / Discord**：`catch (UpstreamAiException)` → 回 `ex.Message`。
+- 訊息中的供應商名稱依**當次實際呼叫的模型**解析，故各供應商（Groq/Mistral/Cerebras/SambaNova）顯示各自名稱。
+- 詳細狀態對應表見 `skills/AI串接錯誤處理指南.md`。
+
+> 修改錯誤訊息或新增分類只改 `AiErrorClassifier`，勿在各處重寫 switch。
 
 ### Prompt 強化功能（`Services/Personas/PersonaService.cs`）
 
@@ -413,7 +464,8 @@ LINE / Discord Bot 透過 Webhook 接收外部訊息，端點**不掛 `/api/v1` 
 - 驗簽在 Controller 層用**原始 body bytes** 進行（不可讓框架先解析）；偽造請求回 401。
 - 機敏憑證 `BotToken` / `ChannelSecret` 在 `BotBindings` 以 AES 加密，由 Service 內部解密使用；而 `DiscordPublicKey` 為**公鑰、明文儲存**，由 Controller 直接讀取驗簽（未設定時僅記 Warning 並放行，限本機開發）。
 - Discord 以 `DiscordCommandService` 呼叫 Discord API 自動註冊 Global `/chat` Slash Command；註冊結果寫入 `BotBindings.CredentialValid`（LINE 則以 `GET /v2/bot/info` 驗證 Channel Access Token），供後台標示無效 Bot。
-- 收到訊息 → 查 `BotBinding` + `Persona` → `CompleteWithUsageAsync`（以 Bot 擁有者解析金鑰）→ 寫入 `ExternalMessages` 與 `TokenUsageStats`。
+- 收到訊息 → 查 `BotBinding` + `Persona` → 以 **該 Bot 設定的模型**呼叫 AI（LINE 走 `CompleteWithUsageAsync(modelType: ...)`、Discord 走 `CompleteWithToolsAsync(modelType)`，皆以 Bot 擁有者解析金鑰）→ 寫入 `ExternalMessages` 與 `TokenUsageStats`。
+- AI 上游錯誤（429/401/逾時等）：兩者皆 `catch (UpstreamAiException)` → 直接回覆 `ex.Message`（友善訊息，含對應供應商名稱），與聊天室一致（詳見下方「AI 錯誤處理共通化」）。
 
 ---
 

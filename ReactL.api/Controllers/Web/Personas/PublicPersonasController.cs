@@ -34,6 +34,7 @@ namespace ReactL.api.Controllers.Web.Personas
                 Emoji = d.Emoji,
                 CurrentVersion = d.CurrentVersion,
                 IsBuiltin = d.IsBuiltin,
+                ModelType = d.ModelType,
                 UserId = d.UserId,
                 CreatedAt = d.CreatedAt,
                 UpdatedAt = d.UpdatedAt

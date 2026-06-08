@@ -530,8 +530,9 @@ Controller 以「原始 body bytes」驗簽（不可先讓框架解析）
     │
     ├─ 讀取 Persona.SystemPrompt（若 PersonaId 不為 NULL）
     │
-    ├─ 呼叫 AiService.CompleteWithUsageAsync（非串流 + 回傳 Token 用量）
+    ├─ 以「該 Bot 設定的模型」呼叫 AI（LINE：CompleteWithUsageAsync(modelType)；Discord：CompleteWithToolsAsync(modelType)）
     │   金鑰以 Bot 擁有者（BotBinding.UserId）解析：自帶 → 系統預設
+    │   AI 上游錯誤 → catch UpstreamAiException → 回友善訊息（含供應商名稱），不靜默
     │
     ├─ INSERT ExternalMessages × 2（Role = "user" + "assistant"，含 SenderName / SenderAvatarUrl）
     ├─ UPSERT TokenUsageStats（Source = "line" 或 "discord"）

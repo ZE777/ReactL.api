@@ -12,8 +12,15 @@ namespace ReactL.api.Common.Settings
         /// </summary>
         public string DefaultModel { get; set; } = "groq:llama-3.3-70b-versatile";
 
-        /// <summary>單次 AI 回應的最大 Token 數，控制回應長度與費用</summary>
+        /// <summary>單次 AI 回應的最大 Token 數，控制回應長度與費用（後台聊天等一般路徑使用）</summary>
         public int MaxTokens { get; set; } = 4096;
+
+        /// <summary>
+        /// Discord function calling（工具呼叫）路徑的回應最大 Token 數。
+        /// 因為該路徑會用 Bot 自身設定的模型（可能是 TPM 較低的小模型），且 Discord 訊息上限 2000 字會截斷，
+        /// 故獨立設較小值，避免請求超過小模型每分鐘 token 上限（TPM）而被回 413。
+        /// </summary>
+        public int ToolCallMaxTokens { get; set; } = 2048;
 
         /// <summary>
         /// 呼叫 AI API 的逾時秒數

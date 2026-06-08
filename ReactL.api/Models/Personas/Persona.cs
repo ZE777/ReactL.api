@@ -53,6 +53,13 @@ namespace ReactL.api.Models.Personas
         /// <remarks>bit · NOT NULL · DEFAULT 0</remarks>
         public bool IsBuiltin { get; set; } = false;
 
+        /// <summary>
+        /// 前台公開聊天使用此角色時的 AI 模型（格式 providerId:modelId）。
+        /// 後台聊天的模型由對話本身決定，不受此欄位影響。
+        /// </summary>
+        /// <remarks>nvarchar(50) · NOT NULL · DEFAULT 'groq:llama-3.3-70b-versatile'</remarks>
+        public string ModelType { get; set; } = "groq:llama-3.3-70b-versatile";
+
         // ── 導航屬性 ──────────────────────────────────────────────────────
         public User? User { get; set; }
         public ICollection<PersonaVersion> Versions { get; set; } = [];

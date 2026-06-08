@@ -37,6 +37,10 @@ namespace ReactL.api.Models.Auth
         /// <remarks>datetime2 · NULL</remarks>
         public DateTime? LastLoginAt { get; set; }
 
+        /// <summary>是否必須變更密碼（種子 Admin 首次登入後強制改密）；改密後設為 false</summary>
+        /// <remarks>bit · NOT NULL · DEFAULT 0</remarks>
+        public bool MustChangePassword { get; set; } = false;
+
         // ── 導航屬性 ──────────────────────────────────────────────────────
         public ICollection<Persona> Personas { get; set; } = [];
         public ICollection<PromptTemplate> PromptTemplates { get; set; } = [];

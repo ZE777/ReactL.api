@@ -1,11 +1,15 @@
 using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.HttpOverrides;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using Microsoft.OpenApi.Models;
+using ReactL.api.Common.Constants;
 using ReactL.api.Common.Helpers;
 using ReactL.api.Common.Settings;
 using ReactL.api.Data;
 using ReactL.api.Middleware;
+using ReactL.api.Services.Access;
 using ReactL.api.Services.Ai;
 using ReactL.api.Services.Auth;
 using ReactL.api.Services.BotBindings;
@@ -13,10 +17,12 @@ using ReactL.api.Services.Conversations;
 using ReactL.api.Services.Monitor;
 using ReactL.api.Services.Personas;
 using ReactL.api.Services.PromptTemplates;
+using ReactL.api.Services.PublicChat;
 using ReactL.api.Services.Users;
 using ReactL.api.Services.Webhooks;
 using Serilog;
 using System.Text;
+using System.Threading.RateLimiting;
 
 namespace ReactL.api
 {
@@ -55,6 +61,53 @@ namespace ReactL.api
                 builder.Services.Configure<AiSettings>(builder.Configuration.GetSection("AiSettings"));
                 builder.Services.Configure<CorsSettings>(builder.Configuration.GetSection("CorsSettings"));
                 builder.Services.Configure<EncryptionSettings>(builder.Configuration.GetSection("EncryptionSettings"));
+                builder.Services.Configure<RateLimitSettings>(builder.Configuration.GetSection("RateLimitSettings"));
+                builder.Services.Configure<PublicChatSettings>(builder.Configuration.GetSection("PublicChatSettings"));
+                builder.Services.Configure<AdminSeedSettings>(builder.Configuration.GetSection("AdminSeedSettings"));
+
+                // ── 公開端點流量限制（每 IP 固定視窗）──────────────────────────────────
+                // 對外 [AllowAnonymous] 端點若無防護，會被人不斷消耗系統金鑰額度。
+                // 此為基礎止血層；更精細的存取碼 + 每日 token 配額另行實作。
+                var rateLimitSettings = builder.Configuration
+                    .GetSection("RateLimitSettings").Get<RateLimitSettings>() ?? new RateLimitSettings();
+
+                // 反向代理（Nginx / CDN）後方才需信任 X-Forwarded-For 取得真實 client IP
+                if (rateLimitSettings.UseForwardedHeaders)
+                {
+                    builder.Services.Configure<ForwardedHeadersOptions>(options =>
+                    {
+                        options.ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto;
+                        // KnownProxies/KnownNetworks 預設只信任 loopback；清空代表信任任一上游代理。
+                        // 若部署環境有固定代理 IP，建議改為明確加入 KnownProxies 以防 X-Forwarded-For 偽造。
+                        options.KnownNetworks.Clear();
+                        options.KnownProxies.Clear();
+                    });
+                }
+
+                builder.Services.AddRateLimiter(options =>
+                {
+                    options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+
+                    // 以來源 IP 分區的固定視窗：每 IP 每分鐘 PublicPerMinute 次
+                    options.AddPolicy(RateLimitPolicies.PublicPerIp, httpContext =>
+                    {
+                        var partitionKey = httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+                        return RateLimitPartition.GetFixedWindowLimiter(partitionKey, _ => new FixedWindowRateLimiterOptions
+                        {
+                            PermitLimit = rateLimitSettings.PublicPerMinute,
+                            Window = TimeSpan.FromMinutes(1),
+                            QueueLimit = rateLimitSettings.QueueLimit,
+                            QueueProcessingOrder = QueueProcessingOrder.OldestFirst
+                        });
+                    });
+
+                    // 被限流時加上 Retry-After，讓前端/瀏覽器知道何時可重試
+                    options.OnRejected = (context, _) =>
+                    {
+                        context.HttpContext.Response.Headers.RetryAfter = "60";
+                        return ValueTask.CompletedTask;
+                    };
+                });
 
                 // ── Controllers & Swagger ─────────────────────────────────────────────
                 // 使用 AddControllers 而非 AddControllersWithViews，純 API 不需要 Razor View 引擎
@@ -164,11 +217,20 @@ namespace ReactL.api
                 builder.Services.AddScoped<IConversationService, ConversationService>();
                 builder.Services.AddScoped<IAiService, OpenAiService>();
                 builder.Services.AddScoped<IAiKeyService, AiKeyService>();
+                builder.Services.AddScoped<IAccessCodeService, AccessCodeService>();
+                builder.Services.AddScoped<IPublicChatLogService, PublicChatLogService>();
+                builder.Services.AddScoped<IAdminSeeder, AdminSeeder>();
                 builder.Services.AddScoped<IMonitorService, MonitorService>();
                 builder.Services.AddScoped<ILineWebhookService, LineWebhookService>();
                 builder.Services.AddScoped<IDiscordWebhookService, DiscordWebhookService>();
                 builder.Services.AddScoped<IDiscordCommandService, DiscordCommandService>();
                 builder.Services.AddScoped<ILineCredentialService, LineCredentialService>();
+                builder.Services.AddScoped<IDiscordModerationService, DiscordModerationService>();
+                builder.Services.AddScoped<IDiscordQueryService, DiscordQueryService>();
+                builder.Services.AddScoped<IDiscordToolService, DiscordToolService>();
+
+                // ── 背景服務：前台聊天記錄逾期清除（保留天數見 PublicChatSettings.LogRetentionDays）──
+                builder.Services.AddHostedService<PublicChatLogRetentionService>();
 
                 // ── HttpClient（多 AI 提供商）─────────────────────────────────────────────
                 // 使用 IHttpClientFactory 管理 HttpClient 生命週期，避免 Socket 耗盡
@@ -202,6 +264,12 @@ namespace ReactL.api
                     app.UseSwaggerUI();
                 }
 
+                // 反向代理後方時，需在最前面套用 ForwardedHeaders 才能取得真實 client IP（供限流分區）
+                if (rateLimitSettings.UseForwardedHeaders)
+                {
+                    app.UseForwardedHeaders();
+                }
+
                 app.UseHttpsRedirection();
 
                 // CORS 必須在 UseAuthentication / UseAuthorization 之前，否則 Preflight 請求會被攔截
@@ -222,6 +290,9 @@ namespace ReactL.api
                 app.UseAuthentication();
                 app.UseAuthorization();
 
+                // 流量限制需在路由之後、端點執行之前
+                app.UseRateLimiter();
+
                 app.MapHealthChecks("/health");
                 app.MapControllers();
 
@@ -237,6 +308,17 @@ namespace ReactL.api
                     catch (Exception seedEx)
                     {
                         Log.Warning(seedEx, "系統預設 AI Key 種子寫入失敗（可能 AiKeys 表尚未建立），略過");
+                    }
+
+                    // 種子 Admin 帳號（僅在尚無任何 Admin 時建立，首登強制改密）
+                    try
+                    {
+                        var adminSeeder = scope.ServiceProvider.GetRequiredService<IAdminSeeder>();
+                        adminSeeder.SeedAsync(CancellationToken.None).GetAwaiter().GetResult();
+                    }
+                    catch (Exception seedEx)
+                    {
+                        Log.Warning(seedEx, "種子 Admin 帳號失敗（可能 Users 表尚未建立或欄位缺失），略過");
                     }
                 }
 

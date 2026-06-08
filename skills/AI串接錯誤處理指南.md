@@ -1,40 +1,59 @@
 # AI 串接錯誤處理指南
 
-## 錯誤處理位置
+## 錯誤處理位置（單一事實來源）
 
-`ReactL.api/Services/Ai/OpenAiService.cs` — `CallOpenAiStreamAsync` 方法
+`ReactL.api/Common/Ai/AiError.cs` — `AiErrorClassifier`
 
-所有 AI 提供商的 HTTP 錯誤在此統一處理，轉換為 SSE chunk 回傳前端。
+**所有「狀態碼／例外 → 友善訊息」的對應只存在這裡**，串流與非串流、四個載體共用同一套：
+
+- `AiErrorClassifier.Classify(statusCode, providerDisplay, errorCode?)` → 回傳 `AiError`
+- `AiErrorClassifier.Timeout(providerDisplay)` / `AiErrorClassifier.Network()`
+- `AiError` 含 `Kind`（`AiErrorKind` 列舉）、`FriendlyMessage`、`Retryable`，並衍生 `ChunkType`（限流→`rate_limit`，其餘→`error`）
+
+呼叫端：
+- **串流**（`OpenAiService.CallOpenAiStreamAsync`，供前台公開聊天 + 後台聊天室）：依 `AiError.ChunkType` 回傳對應 SSE chunk。
+- **非串流**（`OpenAiService.PostChatCompletionWithRetryAsync` → `CompleteWithUsageAsync` / `CompleteAsync` / `CompleteWithToolsAsync`）：丟出 `UpstreamAiException(aiError)`，該例外攜帶 `Kind` / `ChunkType`。
+- **LINE / Discord Bot**：`catch (UpstreamAiException)` → 直接把 `ex.Message`（友善訊息）回給使用者。
+
+> ⚠️ 修改錯誤訊息或新增錯誤分類，**只改 `AiErrorClassifier`**，所有載體自動同步；不要再在各處寫 switch。
 
 ---
 
 ## 錯誤回傳格式
 
-後端透過 SSE 串流回傳以下兩種錯誤 chunk：
+| 載體 | 錯誤呈現方式 |
+|------|------------|
+| 前台公開聊天 / 後台聊天室（SSE） | `error` 或 `rate_limit` chunk，前端 Toast / 泡泡顯示 `content` |
+| LINE / Discord Bot | 以一般訊息回覆 `UpstreamAiException.Message` |
+
+SSE chunk 類型：
 
 | chunk type | 觸發時機 | 前端行為 |
 |------------|---------|---------|
-| `error` | 一般錯誤（4xx、5xx、逾時、網路斷線） | Toast 顯示 `content` 訊息 |
-| `rate_limit` | HTTP 429 免費額度耗盡 | Toast 顯示 `content` 訊息 |
+| `error` | 一般錯誤（4xx、5xx、逾時、網路斷線） | 顯示 `content` 訊息 |
+| `rate_limit` | HTTP 429 免費額度耗盡 | 顯示 `content` 訊息（前端可特別提示） |
 
 ---
 
-## HTTP 狀態對應表
+## 狀態 / 例外對應表（以 `AiErrorClassifier` 為準）
 
-| HTTP 狀態 | 實際意義 | 前端顯示訊息 |
-|-----------|---------|------------|
-| 401 | API Key 無效或過期 | `{Provider} API Key 無效或已過期，請至設定頁更新 Key` |
-| 403 | 帳號無權限 | `沒有存取 {Provider} 的權限，請確認帳號方案或 API Key 權限` |
-| 404 | 模型 ID 不存在 | `{Provider} 找不到指定的模型，請切換其他模型` |
-| 413 | 對話 token 超過上限 | `此對話的訊息累積過長，已超過 {Provider} 的 token 上限，請開新對話繼續` |
-| 429 | 免費額度耗盡 | `{Provider} 免費額度已達上限，請稍後再試或切換其他模型` |
-| 400 `model_decommissioned` | 模型已下架 | `{Provider} 的模型已下架或不存在，請切換其他模型` |
-| 400 `model_not_found` | 模型 ID 設定錯誤 | `{Provider} 的模型已下架或不存在，請切換其他模型` |
-| 500 / 502 | 提供商內部錯誤 | `{Provider} 服務發生內部錯誤，請稍後再試` |
-| 503 | 提供商服務中斷 | `{Provider} 服務暫時不可用，請稍後再試` |
-| 網路逾時 | `TaskCanceledException` | `{Provider} 回應逾時，請稍後再試或切換其他模型` |
-| 網路斷線 | 其他未預期例外 | `網路連線失敗，請確認網路狀態後再試` |
-| 其他 4xx | 未分類錯誤 | `AI 服務暫時無法使用（{statusCode}）` |
+| 來源 | `AiErrorKind` | Retryable | 友善訊息 |
+|------|---------------|-----------|---------|
+| 400 | `BadRequest` | 否 | `{Provider} 無法處理此請求（多為模型產生的指令格式有誤），請重試或改用較強的模型` |
+| 401 | `Auth` | 否 | `{Provider} API Key 無效或已過期，請至設定頁更新 Key` |
+| 403 | `Forbidden` | 否 | `沒有存取 {Provider} 的權限，請確認帳號方案或 API Key 權限` |
+| 404 | `ModelNotFound` | 否 | `{Provider} 找不到指定的模型，請切換其他模型` |
+| 408 | `Timeout` | 是 | `{Provider} 回應逾時，請稍後再試` |
+| 413 | `ContentTooLong` | 否 | `內容過長，已超過 {Provider} 的 token 上限，請縮短內容或開新對話再試` |
+| 429 | `RateLimit` | 是 | `{Provider} 免費額度已達上限，請稍後再試或切換其他模型` |
+| `model_decommissioned` / `model_not_found`（任何狀態碼帶此 code） | `ModelNotFound` | 否 | `{Provider} 的模型已下架或不存在，請切換其他模型` |
+| ≥ 500 | `ServerError` | 是 | `{Provider} 服務暫時不可用，請稍後再試` |
+| `TaskCanceledException`（逾時） | `Timeout` | 是 | `{Provider} 回應逾時，請稍後再試或切換其他模型` |
+| `HttpRequestException`（連線失敗） | `Network` | 是 | `AI 服務連線失敗，請稍後再試` |
+| 其他未分類狀態碼 | `Unknown` | 否 | `AI 服務暫時無法使用（{statusCode}）` |
+
+> `{Provider}` 為該次實際呼叫的供應商 DisplayName（依當下模型解析）。LINE / Discord 皆使用 **該 Bot 設定的模型** 解析供應商，故訊息會顯示對應供應商名稱。
+> Retryable=是 者由 `PostChatCompletionWithRetryAsync` 依 `IsTransientStatus`（429/408/5xx）自動重試；Retry-After 過長（>10s）則放棄重試直接回報。
 
 ---
 

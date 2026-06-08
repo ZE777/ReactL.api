@@ -40,6 +40,7 @@ namespace ReactL.api.Controllers.Admin.Users
                 Role = domain.Role,
                 IsActive = domain.IsActive,
                 LastLoginAt = domain.LastLoginAt,
+                MustChangePassword = domain.MustChangePassword,
                 CreatedAt = domain.CreatedAt
             };
             return Ok(ApiResponse<UserProfileResponse>.Ok(result));
@@ -65,6 +66,7 @@ namespace ReactL.api.Controllers.Admin.Users
                 Role = domain.Role,
                 IsActive = domain.IsActive,
                 LastLoginAt = domain.LastLoginAt,
+                MustChangePassword = domain.MustChangePassword,
                 CreatedAt = domain.CreatedAt
             };
             return Ok(ApiResponse<UserProfileResponse>.Ok(result));

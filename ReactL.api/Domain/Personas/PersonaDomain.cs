@@ -30,6 +30,9 @@ namespace ReactL.api.Domain.Personas
         /// <summary>true = 開放前台訪客選用此角色</summary>
         public bool IsBuiltin { get; set; }
 
+        /// <summary>前台公開聊天使用此角色時的 AI 模型（格式 providerId:modelId）</summary>
+        public string ModelType { get; set; } = "groq:llama-3.3-70b-versatile";
+
         /// <summary>Persona 建立時間</summary>
         public DateTime CreatedAt { get; set; }
 

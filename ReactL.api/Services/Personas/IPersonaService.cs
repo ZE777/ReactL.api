@@ -13,11 +13,11 @@ namespace ReactL.api.Services.Personas
         /// <summary>取得單筆 Persona 詳情</summary>
         Task<PersonaDomain> GetByIdAsync(Guid id, Guid userId);
 
-        /// <summary>建立新 Persona（同時建立初始版本快照）</summary>
-        Task<PersonaDomain> CreateAsync(Guid userId, CreatePersonaRequest request);
+        /// <summary>建立新 Persona（同時建立初始版本快照）。canSetModel=false 時忽略 ModelType（僅 Admin 可設前台模型）</summary>
+        Task<PersonaDomain> CreateAsync(Guid userId, CreatePersonaRequest request, bool canSetModel);
 
-        /// <summary>更新 Persona（自動建立版本快照，版本號遞增）</summary>
-        Task<PersonaDomain> UpdateAsync(Guid id, Guid userId, UpdatePersonaRequest request);
+        /// <summary>更新 Persona（自動建立版本快照，版本號遞增）。canSetModel=false 時不更動 ModelType（僅 Admin 可設前台模型）</summary>
+        Task<PersonaDomain> UpdateAsync(Guid id, Guid userId, UpdatePersonaRequest request, bool canSetModel);
 
         /// <summary>軟刪除 Persona，系統內建不可刪除</summary>
         Task DeleteAsync(Guid id, Guid userId);

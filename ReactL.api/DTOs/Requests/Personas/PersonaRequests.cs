@@ -21,6 +21,10 @@ namespace ReactL.api.DTOs.Requests.Personas
 
         /// <summary>true = 開放前台訪客選用此角色</summary>
         public bool IsBuiltin { get; set; } = false;
+
+        /// <summary>前台公開聊天使用此角色時的 AI 模型（格式 providerId:modelId）</summary>
+        [MaxLength(50)]
+        public string ModelType { get; set; } = "groq:llama-3.3-70b-versatile";
     }
 
     /// <summary>更新 Persona 請求（同時產生版本快照）</summary>
@@ -44,6 +48,10 @@ namespace ReactL.api.DTOs.Requests.Personas
 
         /// <summary>true = 開放前台訪客選用此角色</summary>
         public bool IsBuiltin { get; set; } = false;
+
+        /// <summary>前台公開聊天使用此角色時的 AI 模型（格式 providerId:modelId）</summary>
+        [MaxLength(50)]
+        public string ModelType { get; set; } = "groq:llama-3.3-70b-versatile";
     }
 
     /// <summary>AI 強化 Prompt 請求（以各區塊傳入，AI 個別強化後回傳）</summary>

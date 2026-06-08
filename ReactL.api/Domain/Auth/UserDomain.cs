@@ -21,6 +21,9 @@ namespace ReactL.api.Domain.Auth
         /// <summary>最後登入時間</summary>
         public DateTime? LastLoginAt { get; set; }
 
+        /// <summary>是否必須變更密碼（種子 Admin 首登強制改密）</summary>
+        public bool MustChangePassword { get; set; }
+
         /// <summary>帳號建立時間</summary>
         public DateTime CreatedAt { get; set; }
 

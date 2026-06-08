@@ -32,6 +32,7 @@ namespace ReactL.api.Services.Users
                     Role = u.Role,
                     IsActive = u.IsActive,
                     LastLoginAt = u.LastLoginAt,
+                    MustChangePassword = u.MustChangePassword,
                     CreatedAt = u.CreatedAt,
                     UpdatedAt = u.UpdatedAt
                 })
@@ -71,8 +72,10 @@ namespace ReactL.api.Services.Users
             var user = await _db.Users.FindAsync(userId)
                 ?? throw new NotFoundException("User", userId);
 
-            // 先驗證目前密碼，確認是本人操作
-            if (!BCrypt.Net.BCrypt.Verify(request.CurrentPassword.Trim(), user.PasswordHash))
+            // 一般改密需先驗證目前密碼，確認是本人操作；
+            // 首登強制改密時剛以原密碼登入（JWT 已證明身分），免再驗一次原密碼
+            if (!user.MustChangePassword
+                && !BCrypt.Net.BCrypt.Verify(request.CurrentPassword.Trim(), user.PasswordHash))
             {
                 _logger.LogWarning("密碼修改失敗：目前密碼不正確 UserId={UserId}", userId);
                 throw new ValidationException(new Dictionary<string, string[]>
@@ -82,6 +85,8 @@ namespace ReactL.api.Services.Users
             }
 
             user.PasswordHash = BCrypt.Net.BCrypt.HashPassword(request.NewPassword.Trim());
+            // 首登強制改密旗標於成功改密後解除
+            user.MustChangePassword = false;
             await _db.SaveChangesAsync();
 
             _logger.LogInformation("使用者密碼已修改 UserId={UserId}", userId);

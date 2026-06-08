@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using ReactL.api.Common.Constants;
+using ReactL.api.Common.Exceptions;
 using ReactL.api.Common.Helpers;
 using ReactL.api.Data;
 using ReactL.api.DTOs.Requests.Webhooks;
@@ -153,8 +154,16 @@ namespace ReactL.api.Services.Webhooks
                     : systemPrompt;
 
                 // LINE 關閉 HTTP 連線後 cancellationToken 會被觸發，改用 None 讓 AI 呼叫持續到完成
-                // 以 Bot 擁有者的金鑰呼叫 AI（自帶 → 系統預設）
-                (aiReply, tokensIn, tokensOut) = await _ai.CompleteWithUsageAsync(prompt, userText, botUserId, CancellationToken.None);
+                // 以 Bot 擁有者的金鑰呼叫 AI（自帶 → 系統預設），並使用該 Bot 設定的模型（與 Discord 一致）
+                (aiReply, tokensIn, tokensOut) = await _ai.CompleteWithUsageAsync(
+                    prompt, userText, botUserId, CancellationToken.None, modelType: modelType);
+            }
+            catch (UpstreamAiException ex)
+            {
+                // 上游 AI 錯誤（429 額度上限 / 401 金鑰 / 逾時等）已帶友善訊息，直接回給使用者
+                // 與 Discord、聊天室一致：讓使用者知道「為何沒回應」而非籠統訊息
+                _logger.LogWarning("LINE Webhook: 上游 AI 錯誤（{Kind}），BotBindingId={Id}：{Msg}", ex.Kind, botBindingId, ex.Message);
+                aiReply = ex.Message;
             }
             catch (Exception ex)
             {

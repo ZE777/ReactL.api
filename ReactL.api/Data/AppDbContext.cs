@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using ReactL.api.Models.Access;
 using ReactL.api.Models.Ai;
 using ReactL.api.Models.Auth;
 using ReactL.api.Models.Base;
@@ -7,6 +8,7 @@ using ReactL.api.Models.Conversations;
 using ReactL.api.Models.External;
 using ReactL.api.Models.Personas;
 using ReactL.api.Models.PromptTemplates;
+using ReactL.api.Models.PublicChat;
 using ReactL.api.Models.Stats;
 
 // 注意：Model 檔案的 namespace 需對應資料夾結構
@@ -35,6 +37,9 @@ namespace ReactL.api.Data
         public DbSet<ExternalMessage> ExternalMessages => Set<ExternalMessage>();
         public DbSet<TokenUsageStat> TokenUsageStats => Set<TokenUsageStat>();
         public DbSet<AiKey> AiKeys => Set<AiKey>();
+        public DbSet<AccessCode> AccessCodes => Set<AccessCode>();
+        public DbSet<AccessCodeUsage> AccessCodeUsages => Set<AccessCodeUsage>();
+        public DbSet<PublicChatLog> PublicChatLogs => Set<PublicChatLog>();
 
         protected override void OnModelCreating(ModelBuilder modelBuilder)
         {
@@ -66,6 +71,7 @@ namespace ReactL.api.Data
                 e.Property(p => p.SystemPrompt).HasColumnType("nvarchar(max)").IsRequired();
                 e.Property(p => p.PromptSections).HasColumnType("nvarchar(max)");
                 e.Property(p => p.BuiltinGroup).HasMaxLength(50).IsRequired().HasDefaultValue("User");
+                e.Property(p => p.ModelType).HasMaxLength(50).IsRequired().HasDefaultValue("groq:llama-3.3-70b-versatile");
                 e.HasIndex(p => p.UserId).HasDatabaseName("IX_Personas_UserId");
                 e.HasIndex(p => p.IsDeleted).HasDatabaseName("IX_Personas_IsDeleted");
 
@@ -216,6 +222,55 @@ namespace ReactL.api.Data
                  .WithMany()
                  .HasForeignKey(k => k.UserId)
                  .OnDelete(DeleteBehavior.Cascade);
+            });
+
+            // ── AccessCodes ───────────────────────────────────────────────
+            modelBuilder.Entity<AccessCode>(e =>
+            {
+                e.Property(a => a.Code).HasMaxLength(32).IsRequired();
+                e.Property(a => a.Label).HasMaxLength(100);
+
+                // 存取碼全域唯一，供前台以碼查詢
+                e.HasIndex(a => a.Code)
+                 .IsUnique()
+                 .HasDatabaseName("UX_AccessCodes_Code");
+            });
+
+            // ── AccessCodeUsages ──────────────────────────────────────────
+            modelBuilder.Entity<AccessCodeUsage>(e =>
+            {
+                // 同一存取碼同一天只有一筆彙總記錄，供 UPSERT 與每日配額查詢
+                e.HasIndex(u => new { u.AccessCodeId, u.Date })
+                 .IsUnique()
+                 .HasDatabaseName("UX_AccessCodeUsages_AccessCodeId_Date");
+
+                // 刪除存取碼時連帶清除其用量記錄
+                e.HasOne(u => u.AccessCode)
+                 .WithMany(a => a.Usages)
+                 .HasForeignKey(u => u.AccessCodeId)
+                 .OnDelete(DeleteBehavior.Cascade);
+            });
+
+            // ── PublicChatLogs ────────────────────────────────────────────
+            modelBuilder.Entity<PublicChatLog>(e =>
+            {
+                e.Property(p => p.SessionId).HasMaxLength(64).IsRequired();
+                e.Property(p => p.AccessCodeText).HasMaxLength(32);
+                e.Property(p => p.Role).HasMaxLength(20).IsRequired();
+                e.Property(p => p.Content).HasColumnType("nvarchar(max)").IsRequired();
+                e.Property(p => p.ModelType).HasMaxLength(50);
+
+                // 監控頁以 SessionId 分組列出對話，並以時間排序
+                e.HasIndex(p => p.SessionId).HasDatabaseName("IX_PublicChatLogs_SessionId");
+
+                // 保留清除背景服務以 CreatedAt 範圍刪除逾期記錄
+                e.HasIndex(p => p.CreatedAt).HasDatabaseName("IX_PublicChatLogs_CreatedAt");
+
+                // 刪除存取碼時保留聊天記錄，僅將 AccessCodeId 設為 NULL（顯示改用 AccessCodeText 快照）
+                e.HasOne<AccessCode>()
+                 .WithMany()
+                 .HasForeignKey(p => p.AccessCodeId)
+                 .OnDelete(DeleteBehavior.SetNull);
             });
         }
 

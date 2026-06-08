@@ -108,6 +108,28 @@ namespace ReactL.api.Controllers.Webhooks
                 return Ok(new { type = 5 });
             }
 
+            // MESSAGE_COMPONENT（type:3，二次確認按鈕）：先回 type 6 ACK，背景執行後 PATCH 原訊息
+            if (payload.Type == 3)
+            {
+                var capturedPayload = payload;
+                _ = Task.Run(async () =>
+                {
+                    try
+                    {
+                        using var scope = _scopeFactory.CreateScope();
+                        var service     = scope.ServiceProvider.GetRequiredService<IDiscordWebhookService>();
+                        await service.ProcessComponentAsync(botId, capturedPayload, CancellationToken.None);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex, "Discord Webhook 元件互動背景處理例外，BotId={BotId}", botId);
+                    }
+                });
+
+                // type:6 = DEFERRED_UPDATE_MESSAGE，先 ACK 並保留原訊息，稍後 PATCH 為結果
+                return Ok(new { type = 6 });
+            }
+
             _logger.LogInformation("Discord Webhook: 不支援的 type={Type}，BotId={BotId}", payload.Type, botId);
             return BadRequest();
         }
