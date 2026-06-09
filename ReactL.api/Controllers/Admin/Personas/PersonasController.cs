@@ -64,7 +64,7 @@ namespace ReactL.api.Controllers.Admin.Personas
         [ProducesResponseType(typeof(ApiResponse<PersonaDetailResponse>), 200)]
         public async Task<IActionResult> Create([FromBody] CreatePersonaRequest request)
         {
-            // 前台模型僅 Admin 可設定（非 Admin 傳入的 ModelType 由服務層忽略）
+            // 公開於前台與前台模型僅 Admin 可設定（非 Admin 傳入的 IsBuiltin/ModelType 由服務層忽略）
             var domain = await _personaService.CreateAsync(User.GetUserId(), request, User.IsInRole("Admin"));
             var result = ToDetailResponse(domain);
             return Ok(ApiResponse<PersonaDetailResponse>.Ok(result));
@@ -77,7 +77,7 @@ namespace ReactL.api.Controllers.Admin.Personas
         [ProducesResponseType(typeof(ApiResponse<PersonaDetailResponse>), 200)]
         public async Task<IActionResult> Update(Guid id, [FromBody] UpdatePersonaRequest request)
         {
-            // 前台模型僅 Admin 可變更（非 Admin 傳入的 ModelType 由服務層忽略）
+            // 公開於前台與前台模型僅 Admin 可變更（非 Admin 傳入的 IsBuiltin/ModelType 由服務層忽略）
             var domain = await _personaService.UpdateAsync(id, User.GetUserId(), request, User.IsInRole("Admin"));
             var result = ToDetailResponse(domain);
             return Ok(ApiResponse<PersonaDetailResponse>.Ok(result));

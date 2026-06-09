@@ -13,11 +13,11 @@ namespace ReactL.api.Services.Personas
         /// <summary>取得單筆 Persona 詳情。內建（Official）僅 Admin 可存取</summary>
         Task<PersonaDomain> GetByIdAsync(Guid id, Guid userId, bool isAdmin);
 
-        /// <summary>建立新 Persona（同時建立初始版本快照）。canSetModel=false 時忽略 ModelType（僅 Admin 可設前台模型）</summary>
-        Task<PersonaDomain> CreateAsync(Guid userId, CreatePersonaRequest request, bool canSetModel);
+        /// <summary>建立新 Persona（同時建立初始版本快照）。isAdmin=false 時忽略 IsBuiltin 與 ModelType（公開於前台、前台模型僅 Admin 可設）</summary>
+        Task<PersonaDomain> CreateAsync(Guid userId, CreatePersonaRequest request, bool isAdmin);
 
-        /// <summary>更新 Persona（自動建立版本快照，版本號遞增）。canSetModel=false 時不更動 ModelType（僅 Admin 可設前台模型）</summary>
-        Task<PersonaDomain> UpdateAsync(Guid id, Guid userId, UpdatePersonaRequest request, bool canSetModel);
+        /// <summary>更新 Persona（自動建立版本快照，版本號遞增）。isAdmin=false 時不更動 IsBuiltin 與 ModelType（公開於前台、前台模型僅 Admin 可設）</summary>
+        Task<PersonaDomain> UpdateAsync(Guid id, Guid userId, UpdatePersonaRequest request, bool isAdmin);
 
         /// <summary>軟刪除 Persona，系統內建不可刪除（內建僅 Admin 可存取）</summary>
         Task DeleteAsync(Guid id, Guid userId, bool isAdmin);
