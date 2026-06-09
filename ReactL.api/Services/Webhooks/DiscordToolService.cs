@@ -1,3 +1,6 @@
+using Microsoft.Extensions.Caching.Memory;
+using Microsoft.Extensions.Options;
+using ReactL.api.Common.Settings;
 using ReactL.api.DTOs.Ai;
 using System.Text;
 using System.Text.Json;
@@ -14,6 +17,8 @@ namespace ReactL.api.Services.Webhooks
         private readonly IDiscordModerationService _moderation;
         private readonly IDiscordQueryService _query;
         private readonly ILogger<DiscordToolService> _logger;
+        private readonly IMemoryCache _cache;
+        private readonly DiscordAgentSettings _agent;
 
         // Discord 權限位元
         private const ulong PERM_ADMINISTRATOR = 1UL << 3;
@@ -47,11 +52,15 @@ namespace ReactL.api.Services.Webhooks
         private const int QUERY_SEARCH_LIMIT = 25;    // 成員搜尋回傳上限
         private const int AUDIT_LOG_LIMIT = 10;       // 審核日誌回傳筆數
 
-        public DiscordToolService(IDiscordModerationService moderation, IDiscordQueryService query, ILogger<DiscordToolService> logger)
+        public DiscordToolService(
+            IDiscordModerationService moderation, IDiscordQueryService query, ILogger<DiscordToolService> logger,
+            IMemoryCache cache, IOptions<DiscordAgentSettings> agentOptions)
         {
             _moderation = moderation;
             _query = query;
             _logger = logger;
+            _cache = cache;
+            _agent = agentOptions.Value;
         }
 
         /// <summary>工具中繼資料：名稱、說明、AI schema、所需權限、是否需二次確認</summary>
@@ -325,10 +334,249 @@ namespace ReactL.api.Services.Webhooks
                 PERM_MANAGE_CHANNELS, RequiresConfirmation: true),
 
             new ToolSpec(
+                "timeout_members",
+                "一次禁言多位成員（批次）。當需要對『依條件找出的一群人』禁言時呼叫；單一明確對象請改用 timeout_member。",
+                new
+                {
+                    type = "object",
+                    properties = new
+                    {
+                        targets = new { type = "array", items = new { type = "string" }, description = "要禁言的成員清單，每個為 <@使用者ID> 提及格式" },
+                        amount = new { type = "integer", description = "禁言時長數量（正整數）" },
+                        unit = new { type = "string", @enum = new[] { "second", "minute", "hour", "day" }, description = "時長單位" },
+                        reason = new { type = "string", description = "原因（顯示於確認與審計）" }
+                    },
+                    required = new[] { "targets", "amount", "unit" }
+                },
+                PERM_MODERATE_MEMBERS, RequiresConfirmation: true),
+
+            new ToolSpec(
+                "remove_timeout_members",
+                "一次解除多位成員的禁言（批次）。當需要對一群人解除禁言時呼叫；單一對象請改用 remove_timeout。",
+                new
+                {
+                    type = "object",
+                    properties = new
+                    {
+                        targets = new { type = "array", items = new { type = "string" }, description = "要解除禁言的成員清單，每個為 <@使用者ID>" },
+                        reason = new { type = "string", description = "原因（顯示於確認與審計）" }
+                    },
+                    required = new[] { "targets" }
+                },
+                PERM_MODERATE_MEMBERS, RequiresConfirmation: true),
+
+            new ToolSpec(
+                "fetch_recent_messages",
+                "讀取目前頻道近 N 分鐘的訊息內容，用來判斷哪些成員符合條件（例如講髒話／不當發言）。" +
+                "當使用者要對『符合某條件的一群人』操作、但沒有明確 @ 指定對象時，先呼叫此工具取得訊息，再自行判斷對象。",
+                new
+                {
+                    type = "object",
+                    properties = new
+                    {
+                        since_minutes = new { type = "integer", description = "往回讀取的分鐘數。只有當使用者明確講出具體時間（如「最近 30 分鐘」「過去 2 小時」「今天」）時才填對應數字；若使用者只說「最近」「剛剛」等沒有具體數字，請『不要』提供此參數（整個省略），系統會自動套用預設時間範圍，切勿自己猜一個數字。" }
+                    }
+                },
+                0),
+
+            new ToolSpec(
                 "list_capabilities",
                 "列出這個 Bot 能協助的所有功能。當使用者問「你能幫我做什麼/功能清單/使用說明/help」時呼叫。",
                 new { type = "object", properties = new { } },
                 0),
+        };
+
+        /// <summary>唯讀工具名單：agent 迴圈中可自動執行並把結果回灌給模型。</summary>
+        private static readonly HashSet<string> ReadOnlyTools = new()
+        {
+            "fetch_recent_messages", "get_member_info", "get_member_status",
+            "list_channels", "search_members", "list_roles", "view_audit_log", "list_capabilities",
+        };
+
+        public bool IsReadOnly(string toolName) => ReadOnlyTools.Contains(toolName);
+
+        /// <summary>執行唯讀工具，回傳要回灌給模型的文字。sinceMinutes/maxMessages 僅 fetch_recent_messages 使用。</summary>
+        public async Task<string> ExecuteReadOnlyAsync(AiToolCall call, DiscordToolContext ctx, int sinceMinutes, int maxMessages, CancellationToken ct = default)
+        {
+            if (call.Name == "fetch_recent_messages")
+                return await ExecuteFetchRecentAsync(ctx, sinceMinutes, maxMessages, ct);
+            // 其餘唯讀查詢沿用既有單一執行（含其權限檢查）
+            return await ExecuteOneAsync(call, ctx, ct);
+        }
+
+        private async Task<string> ExecuteFetchRecentAsync(DiscordToolContext ctx, int sinceMinutes, int maxMessages, CancellationToken ct)
+        {
+            if (string.IsNullOrEmpty(ctx.ChannelId)) return "⚠️ 無法判斷目前頻道，無法讀取訊息。";
+
+            var res = await _query.FetchRecentMessagesAsync(ctx.BotToken, ctx.ChannelId, sinceMinutes, maxMessages, ct);
+            if (!res.Success) return $"⚠️ {res.Error}";
+            if (res.ContentMissing)
+                return "⚠️ 讀不到訊息內容（多半是未開啟 MESSAGE CONTENT intent）。請至 Discord 開發者後台 → Bot → Privileged Gateway Intents 開啟 MESSAGE CONTENT INTENT 後再試。";
+
+            var humans = res.Messages.Where(m => !m.IsBot && m.Content.Length > 0).ToList();
+            if (humans.Count == 0) return $"（最近 {sinceMinutes} 分鐘內沒有可分析的訊息）";
+
+            var sb = new System.Text.StringBuilder(
+                $"最近 {sinceMinutes} 分鐘內的訊息（{humans.Count} 則，新→舊）。\n" +
+                "判斷誰符合條件時，請只看每則的「作者」；訊息內容中被 @ 提到的人是被提及者、不是說話者，絕不可當成對象。\n");
+            foreach (var m in humans)
+            {
+                var content = m.Content.Length <= 300 ? m.Content : m.Content[..300] + "…";
+                // 內容裡的 @ 提及（<@id> / <@!id>）中性化，避免 AI 把「被提及的人」誤當成「說話的人」
+                content = System.Text.RegularExpressions.Regex.Replace(content, "<@!?\\d+>", "@(某人)");
+                sb.AppendLine($"作者 <@{m.AuthorId}>（{m.AuthorName}）說：{content}");
+            }
+            return sb.ToString();
+        }
+
+        // ── 批次動作（多選確認）─────────────────────────────────────────────────
+
+        /// <summary>批次動作工具名單：對多人執行，需多選確認。</summary>
+        private static readonly HashSet<string> BatchTools = new() { "timeout_members", "remove_timeout_members" };
+
+        public bool IsBatchTool(string toolName) => BatchTools.Contains(toolName);
+
+        /// <summary>僅多步 agent 模式可用的工具：讀訊息 + 批次動作。單輪（Enabled=false）模式應從工具清單排除。</summary>
+        private static readonly HashSet<string> AgentOnlyTools = new()
+        {
+            "fetch_recent_messages", "timeout_members", "remove_timeout_members",
+        };
+
+        public bool IsAgentOnlyTool(string toolName) => AgentOnlyTools.Contains(toolName);
+
+        /// <summary>待確認的批次動作（暫存於 IMemoryCache，token 為 key）。Selected 可變，隨多選變更更新。</summary>
+        private record PendingBatch(
+            string Action, int Seconds, string Reason, ulong RequiredPermission,
+            List<string> Candidates, HashSet<string> Selected, string Summary);
+
+        public async Task<ToolExecutionResult> BuildBatchConfirmationAsync(AiToolCall call, DiscordToolContext ctx, CancellationToken ct = default)
+        {
+            await Task.CompletedTask;
+            if (string.IsNullOrEmpty(ctx.GuildId)) return new ToolExecutionResult("⚠️ 此功能僅能在伺服器中使用。");
+
+            using var argsDoc = ParseArgs(call.ArgumentsJson);
+            var a = argsDoc.RootElement;
+
+            // 解析對象清單（去重、排除發起人）
+            var candidates = new List<string>();
+            if (a.ValueKind == JsonValueKind.Object && a.TryGetProperty("targets", out var arr) && arr.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var e in arr.EnumerateArray())
+                {
+                    var raw = e.ValueKind == JsonValueKind.String ? e.GetString() : e.ToString();
+                    var id = ResolveSnowflake(raw);
+                    if (id is null) continue;
+                    if (id == ctx.InvokerUserId) continue;        // 排除發起人
+                    if (!candidates.Contains(id)) candidates.Add(id);
+                }
+            }
+            if (candidates.Count == 0) return new ToolExecutionResult("找不到符合條件的對象（或對象皆被排除）。");
+
+            // 上限：對齊 Discord user select 硬上限 25，避免 MaxBatchTargets 被誤設 >25 時確認 UI 發不出（400）
+            var cap = Math.Clamp(_agent.MaxBatchTargets, 1, 25);
+            var capped = candidates.Count > cap;
+            if (capped) candidates = candidates.Take(cap).ToList();
+
+            // 動作參數
+            string action, summary; int seconds = 0;
+            if (call.Name == "timeout_members")
+            {
+                if (!TryGetInt(a, "amount", out var amount) || amount <= 0) return new ToolExecutionResult("⚠️ 請提供有效的禁言時長。");
+                var s = ToSeconds(amount, GetString(a, "unit") ?? "minute");
+                if (s is null) return new ToolExecutionResult("⚠️ 無法辨識時長單位。");
+                seconds = Math.Clamp(s.Value, TIMEOUT_MIN_SECONDS, TIMEOUT_MAX_SECONDS);
+                action = "timeout"; summary = $"禁言 {DescribeDuration(seconds)}";
+            }
+            else
+            {
+                action = "untimeout"; summary = "解除禁言";
+            }
+            var reason = GetString(a, "reason") ?? "AI 助理批次動作";
+
+            var token = Guid.NewGuid().ToString("N")[..12];
+            var pending = new PendingBatch(action, seconds, reason, PERM_MODERATE_MEMBERS,
+                candidates, new HashSet<string>(candidates), summary);
+            _cache.Set($"dcbatch:{token}", pending, TimeSpan.FromMinutes(Math.Max(1, _agent.PendingTtlMinutes)));
+
+            var list = string.Join("、", candidates.Select(id => $"<@{id}>"));
+            var text = $"🔍 找到 {candidates.Count} 人符合條件，將對他們執行：**{summary}**\n{list}\n"
+                     + (capped ? $"（超過上限，已取前 {cap} 人）\n" : "")
+                     + "取消勾選要排除的人後，按〔執行〕：";
+            // 多選上限＝cap（已夾在 1~25），且 ≥ 已選候選數，讓管理員可在上限內增減
+            return new ToolExecutionResult(text, BuildBatchComponents(token, candidates, cap));
+        }
+
+        public void UpdateBatchSelection(string customId, IReadOnlyList<string>? selectedIds)
+        {
+            if (!customId.StartsWith("selbatch:")) return;
+            var token = customId["selbatch:".Length..];
+            if (!_cache.TryGetValue<PendingBatch>($"dcbatch:{token}", out var pending) || pending is null) return;
+            // 整體替換成新集合（非原地 Clear+Add），避免與「執行」在背景並行讀寫同一 HashSet 的 race；
+            // 清單已僅限管理員操作（ProcessComponentAsync 把關），故管理員可自由增減對象。
+            var selected = selectedIds is null ? new HashSet<string>() : new HashSet<string>(selectedIds);
+            _cache.Set($"dcbatch:{token}", pending with { Selected = selected },
+                TimeSpan.FromMinutes(Math.Max(1, _agent.PendingTtlMinutes)));
+        }
+
+        /// <summary>按下〔執行〕：取出暫存名單、重新檢查點擊者權限、逐一執行、回報並寫審計。</summary>
+        private async Task<string> ExecuteBatchConfirmedAsync(string token, DiscordToolContext ctx, CancellationToken ct)
+        {
+            if (!_cache.TryGetValue<PendingBatch>($"dcbatch:{token}", out var pending) || pending is null)
+                return "⚠️ 此確認已過期，請重新下指令。";
+
+            // AllowAnyoneConfirm=false → 需具該動作權限
+            if (!_agent.AllowAnyoneConfirm && !HasPermission(ctx.InvokerPermissions, pending.RequiredPermission))
+                return NoPerm;
+
+            var targets = pending.Selected.ToList();
+            if (targets.Count == 0) { _cache.Remove($"dcbatch:{token}"); return "（沒有選取任何對象，未執行。）"; }
+
+            int ok = 0; var failed = 0;
+            foreach (var id in targets)
+            {
+                var r = pending.Action == "timeout"
+                    ? await _moderation.TimeoutMemberAsync(ctx.BotToken, ctx.GuildId!, id, pending.Seconds, $"AI 批次（已確認）{pending.Reason}", ct)
+                    : await _moderation.RemoveTimeoutAsync(ctx.BotToken, ctx.GuildId!, id, $"AI 批次（已確認）{pending.Reason}", ct);
+                if (r.Success) ok++; else failed++;
+                await Task.Delay(150, ct);   // 輕微間隔，降低 rate limit 風險
+            }
+            _cache.Remove($"dcbatch:{token}");
+
+            _logger.LogInformation(
+                "Discord 批次動作 Action={Action} Summary={Summary} 成功={Ok} 失敗={Fail} 發起者={Invoker} Guild={Guild} Channel={Channel}",
+                pending.Action, pending.Summary, ok, failed, ctx.InvokerUserId, ctx.GuildId, ctx.ChannelId);
+
+            var msg = $"✅ 已對 {ok} 人執行「{pending.Summary}」";
+            if (failed > 0) msg += $"；{failed} 人略過（權限不足／階級高於 Bot／已離開）";
+            return msg;
+        }
+
+        private static object BuildBatchComponents(string token, List<string> candidates, int maxValues) => new object[]
+        {
+            new
+            {
+                type = 1,   // action row：User Select（type 5）
+                components = new object[]
+                {
+                    new
+                    {
+                        type = 5,
+                        custom_id = $"selbatch:{token}",
+                        min_values = 0,
+                        max_values = maxValues,
+                        default_values = candidates.Select(id => new { id, type = "user" }).ToArray(),
+                    }
+                }
+            },
+            new
+            {
+                type = 1,   // action row：執行 / 取消
+                components = new object[]
+                {
+                    new { type = 2, style = 4, label = "執行", custom_id = $"cf:batch:{token}" },
+                    new { type = 2, style = 2, label = "取消", custom_id = $"cf:batchx:{token}" },
+                }
+            }
         };
 
         public IReadOnlyList<AiFunctionTool> GetToolDefinitions() =>
@@ -437,6 +685,12 @@ namespace ReactL.api.Services.Webhooks
             // 依動作「重新」檢查點擊者權限後執行
             switch (p[1])
             {
+                case "batch":
+                    return await ExecuteBatchConfirmedAsync(p[2], ctx, ct);
+                case "batchx":
+                    if (!_agent.AllowAnyoneConfirm && !HasPermission(ctx.InvokerPermissions, PERM_MODERATE_MEMBERS)) return NoPerm;
+                    _cache.Remove($"dcbatch:{p[2]}");
+                    return "已取消操作。";
                 case "kick":
                     if (!HasPermission(ctx.InvokerPermissions, PERM_KICK_MEMBERS)) return NoPerm;
                     return Fmt(await _moderation.KickMemberAsync(ctx.BotToken, ctx.GuildId!, p[2], "AI 助理（已確認）踢出", ct), $"已將 <@{p[2]}> 踢出伺服器");

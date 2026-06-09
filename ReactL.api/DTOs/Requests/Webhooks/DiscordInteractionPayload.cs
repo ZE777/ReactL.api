@@ -50,6 +50,10 @@ namespace ReactL.api.DTOs.Requests.Webhooks
         [JsonPropertyName("custom_id")]
         public string? CustomId { get; set; }
 
+        /// <summary>元件互動（select 選單）被選取的值；User Select 時為使用者 ID 清單。</summary>
+        [JsonPropertyName("values")]
+        public List<string>? Values { get; set; }
+
         /// <summary>
         /// 指令參數中被提及（@user / #channel / @role）的實體，Discord 已解析好 ID 對應物件。
         /// function calling 需以此驗證/取得目標真實 ID，避免用名稱猜。

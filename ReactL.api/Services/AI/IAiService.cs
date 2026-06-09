@@ -51,5 +51,23 @@ namespace ReactL.api.Services.Ai
         Task<AiToolResult> CompleteWithToolsAsync(
             string systemPrompt, string userPrompt, IReadOnlyList<AiFunctionTool> tools,
             string modelType, Guid? ownerUserId = null, CancellationToken cancellationToken = default, bool allowSystemFallback = true);
+
+        /// <summary>
+        /// 多步（agentic）工具呼叫迴圈。模型可「呼叫唯讀工具 → 看結果 → 再決策」，
+        /// 用於「依條件找人/找訊息再執行動作」。迴圈內自動執行「唯讀工具」並回灌結果；
+        /// 遇到「動作工具」（executeReadOnlyTool 回 null）即停止，將該回合工具呼叫放入結果交呼叫端執行。
+        /// 受 maxSteps 與 maxTokensBudget（累計輸入+輸出）雙重上限保護。
+        /// </summary>
+        /// <param name="executeTool">
+        /// 處置單一工具呼叫：唯讀工具→<see cref="AgentToolResponse.FromReadOnly"/>（回灌續推）；
+        /// 動作工具→<see cref="AgentToolResponse.Action"/>（停止、交還呼叫端）；
+        /// 硬停止（如超出規範）→<see cref="AgentToolResponse.Stop"/>（直接以該文字結束）。
+        /// </param>
+        Task<AiAgentResult> RunToolAgentAsync(
+            string systemPrompt, string userPrompt, IReadOnlyList<AiFunctionTool> tools,
+            string modelType, Guid? ownerUserId,
+            Func<AiToolCall, CancellationToken, Task<AgentToolResponse>> executeTool,
+            int maxSteps, int maxTokensBudget,
+            CancellationToken cancellationToken = default);
     }
 }

@@ -50,12 +50,15 @@ namespace ReactL.api.Services.Personas
                 .ToListAsync();
         }
 
-        /// <summary>回傳系統內建（BuiltinGroup == "Official"）+ 當前使用者自訂的 Persona</summary>
-        public async Task<List<PersonaDomain>> GetListAsync(Guid userId)
+        /// <summary>
+        /// 回傳 Persona 清單：Admin 含系統內建（BuiltinGroup == "Official"）+ 本人自訂；
+        /// 非 Admin（自建帳號）僅本人自訂，看不到內建角色（內建角色僅供系統/Admin）。
+        /// </summary>
+        public async Task<List<PersonaDomain>> GetListAsync(Guid userId, bool isAdmin)
         {
             return await _db.Personas
                 .AsNoTracking()
-                .Where(p => p.BuiltinGroup == "Official" || p.UserId == userId)
+                .Where(p => p.UserId == userId || (isAdmin && p.BuiltinGroup == "Official"))
                 .OrderBy(p => p.BuiltinGroup == "Official" ? 0 : 1)
                 .ThenBy(p => p.CreatedAt)
                 .Select(p => new PersonaDomain
@@ -76,12 +79,12 @@ namespace ReactL.api.Services.Personas
                 .ToListAsync();
         }
 
-        /// <summary>取得單筆 Persona 詳情</summary>
-        public async Task<PersonaDomain> GetByIdAsync(Guid id, Guid userId)
+        /// <summary>取得單筆 Persona 詳情（內建 Official 僅 Admin 可存取）</summary>
+        public async Task<PersonaDomain> GetByIdAsync(Guid id, Guid userId, bool isAdmin)
         {
             var p = await _db.Personas
                 .AsNoTracking()
-                .Where(p => p.Id == id && (p.BuiltinGroup == "Official" || p.UserId == userId))
+                .Where(p => p.Id == id && (p.UserId == userId || (isAdmin && p.BuiltinGroup == "Official")))
                 .Select(p => new PersonaDomain
                 {
                     Id = p.Id,
@@ -131,13 +134,13 @@ namespace ReactL.api.Services.Personas
             });
 
             await _db.SaveChangesAsync();
-            return await GetByIdAsync(persona.Id, userId);
+            return await GetByIdAsync(persona.Id, userId, canSetModel);
         }
 
         /// <summary>更新 Persona（先快照舊版本，再更新欄位，版本號遞增）</summary>
         public async Task<PersonaDomain> UpdateAsync(Guid id, Guid userId, UpdatePersonaRequest request, bool canSetModel)
         {
-            var persona = await GetOwnedPersonaAsync(id, userId);
+            var persona = await GetOwnedPersonaAsync(id, userId, canSetModel);
 
             // 先快照舊版本，再更新欄位，版本號遞增
             _db.PersonaVersions.Add(new PersonaVersion
@@ -159,13 +162,13 @@ namespace ReactL.api.Services.Personas
             persona.CurrentVersion += 1;
 
             await _db.SaveChangesAsync();
-            return await GetByIdAsync(id, userId);
+            return await GetByIdAsync(id, userId, canSetModel);
         }
 
         /// <summary>軟刪除 Persona，系統內建（BuiltinGroup == "Official"）不可刪除</summary>
-        public async Task DeleteAsync(Guid id, Guid userId)
+        public async Task DeleteAsync(Guid id, Guid userId, bool isAdmin)
         {
-            var persona = await GetOwnedPersonaAsync(id, userId);
+            var persona = await GetOwnedPersonaAsync(id, userId, isAdmin);
 
             if (persona.BuiltinGroup == "Official")
                 throw new ForbiddenException("系統內建 Persona 不可刪除");
@@ -176,10 +179,10 @@ namespace ReactL.api.Services.Personas
         }
 
         /// <summary>取得指定 Persona 的版本快照清單（確認使用者有存取權後再查詢）</summary>
-        public async Task<List<PersonaVersionDomain>> GetVersionsAsync(Guid personaId, Guid userId)
+        public async Task<List<PersonaVersionDomain>> GetVersionsAsync(Guid personaId, Guid userId, bool isAdmin)
         {
             // 確認使用者有存取權後再查詢版本
-            await GetOwnedPersonaAsync(personaId, userId);
+            await GetOwnedPersonaAsync(personaId, userId, isAdmin);
 
             return await _db.PersonaVersions
                 .AsNoTracking()
@@ -199,9 +202,9 @@ namespace ReactL.api.Services.Personas
         }
 
         /// <summary>取得單一版本快照詳情</summary>
-        public async Task<PersonaVersionDomain> GetVersionDetailAsync(Guid personaId, Guid versionId, Guid userId)
+        public async Task<PersonaVersionDomain> GetVersionDetailAsync(Guid personaId, Guid versionId, Guid userId, bool isAdmin)
         {
-            await GetOwnedPersonaAsync(personaId, userId);
+            await GetOwnedPersonaAsync(personaId, userId, isAdmin);
 
             var version = await _db.PersonaVersions
                 .AsNoTracking()
@@ -222,9 +225,9 @@ namespace ReactL.api.Services.Personas
         }
 
         /// <summary>回滾至指定版本（回滾當作一次新修改，版本號繼續遞增，保留完整歷史）</summary>
-        public async Task<PersonaDomain> RollbackAsync(Guid personaId, Guid versionId, Guid userId)
+        public async Task<PersonaDomain> RollbackAsync(Guid personaId, Guid versionId, Guid userId, bool isAdmin)
         {
-            var persona = await GetOwnedPersonaAsync(personaId, userId);
+            var persona = await GetOwnedPersonaAsync(personaId, userId, isAdmin);
 
             var targetVersion = await _db.PersonaVersions
                 .AsNoTracking()
@@ -249,7 +252,7 @@ namespace ReactL.api.Services.Personas
 
             _logger.LogInformation("Persona 版本回滾完成 PersonaId={PersonaId} UserId={UserId} TargetVersion={TargetVersion} NewVersion={NewVersion}",
                 personaId, userId, targetVersion.Version, persona.CurrentVersion);
-            return await GetByIdAsync(personaId, userId);
+            return await GetByIdAsync(personaId, userId, isAdmin);
         }
 
         /// <summary>
@@ -314,13 +317,15 @@ namespace ReactL.api.Services.Personas
         /// 取得使用者有所有權的 Persona（已追蹤，可直接修改）
         /// 若找不到或無權限則拋出對應例外
         /// </summary>
-        private async Task<Persona> GetOwnedPersonaAsync(Guid id, Guid userId)
+        private async Task<Persona> GetOwnedPersonaAsync(Guid id, Guid userId, bool isAdmin)
         {
             var persona = await _db.Personas.FindAsync(id)
                 ?? throw new NotFoundException("Persona", id);
 
-            // Official Persona 屬於系統用戶，一般使用者無寫入權
-            if (persona.UserId != userId)
+            // 本人擁有 → 可操作；系統內建（Official）僅 Admin 可管理，一般使用者無權
+            var ownsIt = persona.UserId == userId;
+            var adminOnOfficial = isAdmin && persona.BuiltinGroup == "Official";
+            if (!ownsIt && !adminOnOfficial)
                 throw new ForbiddenException("無權限操作此 Persona");
 
             return persona;

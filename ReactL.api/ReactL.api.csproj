@@ -2,6 +2,8 @@
 
   <PropertyGroup>
     <TargetFramework>net8.0</TargetFramework>
+    <!-- 產品版本（與前端同步，見 rules/版本與發布規範.md）-->
+    <Version>1.0.0</Version>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <!-- 產生 XML 文件檔，供 Swagger 自動讀取 Controller/Action 的 <summary> 註解 -->

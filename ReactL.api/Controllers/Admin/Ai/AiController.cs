@@ -70,7 +70,8 @@ namespace ReactL.api.Controllers.Admin.Ai
                 Models = p.Models.Select(m => new AiModelDto
                 {
                     Id = m.Id,
-                    DisplayName = m.DisplayName
+                    DisplayName = m.DisplayName,
+                    RecommendedForTools = m.RecommendedForTools
                 }).ToList()
             }).ToList();
 

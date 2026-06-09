@@ -64,6 +64,7 @@ namespace ReactL.api
                 builder.Services.Configure<RateLimitSettings>(builder.Configuration.GetSection("RateLimitSettings"));
                 builder.Services.Configure<PublicChatSettings>(builder.Configuration.GetSection("PublicChatSettings"));
                 builder.Services.Configure<AdminSeedSettings>(builder.Configuration.GetSection("AdminSeedSettings"));
+                builder.Services.Configure<DiscordAgentSettings>(builder.Configuration.GetSection("DiscordAgentSettings"));
 
                 // ── 公開端點流量限制（每 IP 固定視窗）──────────────────────────────────
                 // 對外 [AllowAnonymous] 端點若無防護，會被人不斷消耗系統金鑰額度。
@@ -215,6 +216,7 @@ namespace ReactL.api
                 builder.Services.AddScoped<IPromptTemplateService, PromptTemplateService>();
                 builder.Services.AddScoped<IBotBindingService, BotBindingService>();
                 builder.Services.AddScoped<IConversationService, ConversationService>();
+                builder.Services.AddMemoryCache();   // Discord agent：發起節流 + 待確認批次暫存
                 builder.Services.AddScoped<IAiService, OpenAiService>();
                 builder.Services.AddScoped<IAiKeyService, AiKeyService>();
                 builder.Services.AddScoped<IAccessCodeService, AccessCodeService>();

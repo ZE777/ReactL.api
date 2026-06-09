@@ -18,6 +18,9 @@ namespace ReactL.api.Services.Webhooks
         /// <summary>下指令者的已計算權限位元</summary>
         public ulong InvokerPermissions { get; set; }
 
+        /// <summary>下指令／點擊者的 Discord 使用者 ID（批次排除發起人、審計用）</summary>
+        public string? InvokerUserId { get; set; }
+
         /// <summary>interaction 解析出的提及實體（驗證/取得目標 ID 用）</summary>
         public DiscordResolved? Resolved { get; set; }
     }
@@ -48,5 +51,29 @@ namespace ReactL.api.Services.Webhooks
         /// 會重新檢查點擊者的權限。回傳 null 代表此 custom_id 非本服務的確認動作（例如「取消」）。
         /// </summary>
         Task<string?> ExecuteConfirmedAsync(string customId, DiscordToolContext context, CancellationToken cancellationToken = default);
+
+        /// <summary>該工具是否為唯讀（agent 多步迴圈可自動執行並回灌結果，不需確認）。</summary>
+        bool IsReadOnly(string toolName);
+
+        /// <summary>
+        /// 執行唯讀工具，回傳要回灌給模型的文字。
+        /// sinceMinutes / maxMessages 僅供 fetch_recent_messages 使用（呼叫端已做時間窗上限驗證）。
+        /// </summary>
+        Task<string> ExecuteReadOnlyAsync(AiToolCall call, DiscordToolContext context, int sinceMinutes, int maxMessages, CancellationToken cancellationToken = default);
+
+        /// <summary>該工具是否為「批次動作」（對多個對象執行，需多選確認）。</summary>
+        bool IsBatchTool(string toolName);
+
+        /// <summary>是否為「僅多步 agent 模式」可用的工具（fetch_recent_messages / 批次工具）；單輪模式應排除。</summary>
+        bool IsAgentOnlyTool(string toolName);
+
+        /// <summary>
+        /// 為批次動作組「多選確認」：過濾並暫存對象清單（token），回傳含 User Select + 執行/取消按鈕的訊息。
+        /// 使用者可取消勾選要排除的人，按〔執行〕後才真正執行。
+        /// </summary>
+        Task<ToolExecutionResult> BuildBatchConfirmationAsync(AiToolCall call, DiscordToolContext context, CancellationToken cancellationToken = default);
+
+        /// <summary>多選變更時更新暫存的勾選名單（僅限原候選，防止亂加對象）。</summary>
+        void UpdateBatchSelection(string customId, IReadOnlyList<string>? selectedIds);
     }
 }

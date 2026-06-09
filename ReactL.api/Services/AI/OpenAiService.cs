@@ -423,6 +423,7 @@ namespace ReactL.api.Services.Ai
                     if (!call.TryGetProperty("function", out var fn)) continue;
                     result.ToolCalls.Add(new AiToolCall
                     {
+                        Id = call.TryGetProperty("id", out var id) ? (id.GetString() ?? string.Empty) : string.Empty,
                         Name = fn.TryGetProperty("name", out var n) ? (n.GetString() ?? string.Empty) : string.Empty,
                         ArgumentsJson = fn.TryGetProperty("arguments", out var a) ? (a.GetString() ?? "{}") : "{}"
                     });
@@ -439,6 +440,135 @@ namespace ReactL.api.Services.Ai
                 if (usage.TryGetProperty("completion_tokens", out var ct)) result.TokensOut = ct.GetInt32();
             }
 
+            return result;
+        }
+
+        public async Task<AiAgentResult> RunToolAgentAsync(
+            string systemPrompt, string userPrompt, IReadOnlyList<AiFunctionTool> tools,
+            string modelType, Guid? ownerUserId,
+            Func<AiToolCall, CancellationToken, Task<AgentToolResponse>> executeTool,
+            int maxSteps, int maxTokensBudget,
+            CancellationToken cancellationToken = default)
+        {
+            var (providerId, modelName) = ParseModelType(modelType);
+            var providerDisplay = ResolveProviderDisplay(providerId);
+            var authKey = await _aiKeys.ResolveKeyAsync(ownerUserId, providerId, allowSystemFallback: true, cancellationToken);
+            if (string.IsNullOrEmpty(authKey))
+                throw new ForbiddenException($"尚未設定 {providerDisplay} 的 API 金鑰");
+            var client = _httpClientFactory.CreateClient($"ai:{providerId}");
+
+            var toolsPayload = tools.Select(t => new
+            {
+                type = "function",
+                function = new { name = t.Name, description = t.Description, parameters = t.Parameters }
+            }).ToArray();
+
+            // 對話訊息（會隨工具回灌而成長）
+            var messages = new List<object>
+            {
+                new { role = "system", content = systemPrompt },
+                new { role = "user", content = userPrompt },
+            };
+
+            var result = new AiAgentResult();
+            var steps = Math.Max(1, maxSteps);
+
+            for (var step = 1; step <= steps; step++)
+            {
+                result.Steps = step;
+
+                object body = new
+                {
+                    model = modelName,
+                    messages,
+                    tools = toolsPayload,
+                    tool_choice = "auto",
+                    max_tokens = _aiSettings.ToolCallMaxTokens,
+                    stream = false,
+                };
+
+                using var response = await PostChatCompletionWithRetryAsync(
+                    client, providerId, providerDisplay, body, authKey, cancellationToken);
+                var json = await response.Content.ReadAsStringAsync(cancellationToken);
+                using var doc = JsonDocument.Parse(json);
+                var root = doc.RootElement;
+                var message = root.GetProperty("choices")[0].GetProperty("message");
+
+                if (root.TryGetProperty("usage", out var usage))
+                {
+                    if (usage.TryGetProperty("prompt_tokens", out var pt)) result.TokensIn += pt.GetInt32();
+                    if (usage.TryGetProperty("completion_tokens", out var ot)) result.TokensOut += ot.GetInt32();
+                }
+
+                // 沒有 tool_calls → 模型給出最終純文字，結束
+                if (!message.TryGetProperty("tool_calls", out var toolCalls)
+                    || toolCalls.ValueKind != JsonValueKind.Array || toolCalls.GetArrayLength() == 0)
+                {
+                    result.FinalText = message.TryGetProperty("content", out var c) ? c.GetString() : null;
+                    return result;
+                }
+
+                // 解析本回合工具呼叫
+                var turnCalls = new List<AiToolCall>();
+                foreach (var call in toolCalls.EnumerateArray())
+                {
+                    if (!call.TryGetProperty("function", out var fn)) continue;
+                    turnCalls.Add(new AiToolCall
+                    {
+                        Id = call.TryGetProperty("id", out var id) ? (id.GetString() ?? string.Empty) : string.Empty,
+                        Name = fn.TryGetProperty("name", out var n) ? (n.GetString() ?? string.Empty) : string.Empty,
+                        ArgumentsJson = fn.TryGetProperty("arguments", out var a) ? (a.GetString() ?? "{}") : "{}",
+                    });
+                }
+
+                // 回灌 assistant 的 tool_calls（多步協定要求）
+                messages.Add(new
+                {
+                    role = "assistant",
+                    content = (string?)null,
+                    tool_calls = turnCalls.Select(tc => new
+                    {
+                        id = tc.Id,
+                        type = "function",
+                        function = new { name = tc.Name, arguments = tc.ArgumentsJson },
+                    }).ToArray(),
+                });
+
+                // 逐一處置：唯讀→回灌續推；動作→收集後停止交還；硬停止→直接結束
+                var terminalCalls = new List<AiToolCall>();
+                foreach (var call in turnCalls)
+                {
+                    var outcome = await executeTool(call, cancellationToken);
+                    switch (outcome.Kind)
+                    {
+                        case AgentToolKind.Stop:
+                            result.FinalText = outcome.Text;
+                            return result;
+                        case AgentToolKind.Action:
+                            terminalCalls.Add(call);
+                            break;
+                        default: // ReadOnly
+                            messages.Add(new { role = "tool", tool_call_id = call.Id, content = outcome.Text ?? string.Empty });
+                            break;
+                    }
+                }
+
+                if (terminalCalls.Count > 0)
+                {
+                    result.TerminalToolCalls = terminalCalls;
+                    return result;
+                }
+
+                // token 預算護欄
+                if (maxTokensBudget > 0 && result.TokensIn + result.TokensOut >= maxTokensBudget)
+                {
+                    result.Aborted = true;
+                    return result;
+                }
+            }
+
+            // 達步數上限仍未收斂
+            result.Aborted = true;
             return result;
         }
 

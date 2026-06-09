@@ -31,6 +31,9 @@ namespace ReactL.api.DTOs.Responses.Ai
 
         /// <summary>模型顯示名稱</summary>
         public string DisplayName { get; set; } = string.Empty;
+
+        /// <summary>是否推薦用於 function-calling 場景（前端顯示「推薦」標籤、非推薦時提示）</summary>
+        public bool RecommendedForTools { get; set; }
     }
 
     /// <summary>AI 提供商資訊（含可用模型清單）</summary>

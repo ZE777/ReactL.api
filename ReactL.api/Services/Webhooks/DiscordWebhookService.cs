@@ -1,8 +1,12 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Caching.Memory;
+using Microsoft.Extensions.Options;
 using ReactL.api.Common.Constants;
 using ReactL.api.Common.Exceptions;
 using ReactL.api.Common.Helpers;
+using ReactL.api.Common.Settings;
 using ReactL.api.Data;
+using ReactL.api.DTOs.Ai;
 using ReactL.api.DTOs.Requests.Webhooks;
 using ReactL.api.Models.External;
 using ReactL.api.Models.Stats;
@@ -21,6 +25,8 @@ namespace ReactL.api.Services.Webhooks
         private readonly ILogger<DiscordWebhookService> _logger;
         private readonly AesEncryptionHelper _aes;
         private readonly IDiscordToolService _tools;
+        private readonly DiscordAgentSettings _agent;
+        private readonly IMemoryCache _cache;
 
         private const string DiscordApiBase = "https://discord.com/api/v10";
 
@@ -30,7 +36,9 @@ namespace ReactL.api.Services.Webhooks
             IHttpClientFactory httpClientFactory,
             ILogger<DiscordWebhookService> logger,
             AesEncryptionHelper aes,
-            IDiscordToolService tools)
+            IDiscordToolService tools,
+            IOptions<DiscordAgentSettings> agentOptions,
+            IMemoryCache cache)
         {
             _db = db;
             _ai = ai;
@@ -38,6 +46,8 @@ namespace ReactL.api.Services.Webhooks
             _logger = logger;
             _aes = aes;
             _tools = tools;
+            _agent = agentOptions.Value;
+            _cache = cache;
         }
 
         public async Task ProcessCommandAsync(Guid botId, DiscordInteractionPayload payload, CancellationToken cancellationToken)
@@ -106,34 +116,50 @@ namespace ReactL.api.Services.Webhooks
             int tokensIn = 0, tokensOut = 0;
             try
             {
-                var prompt = BuildSystemPrompt(bot.Persona?.SystemPrompt);
+                var prompt = BuildSystemPrompt(bot.Persona?.SystemPrompt, _agent.Enabled);
 
-                // 以 Bot 設定的模型 + 擁有者金鑰呼叫；模型須支援 tool calling
-                var toolResult = await _ai.CompleteWithToolsAsync(
-                    prompt, userText, _tools.GetToolDefinitions(), bot.ModelType, bot.UserId, CancellationToken.None);
-                tokensIn = toolResult.TokensIn;
-                tokensOut = toolResult.TokensOut;
-
-                if (toolResult.HasToolCalls)
+                // AI 碰不到 Discord API，所有動作由後端依此情境執行
+                var ctx = new DiscordToolContext
                 {
-                    // AI 決定執行管理動作 → 驗證並執行（AI 碰不到 Discord API，由後端執行）
-                    var ctx = new DiscordToolContext
-                    {
-                        BotToken = _aes.Decrypt(bot.BotTokenEncrypted),
-                        GuildId = payload.GuildId,
-                        ChannelId = payload.ChannelId,
-                        InvokerPermissions = ParsePermissions(payload.Member?.Permissions),
-                        Resolved = payload.Data?.Resolved
-                    };
-                    var exec = await _tools.ExecuteAsync(toolResult.ToolCalls, ctx, CancellationToken.None);
-                    aiReply = exec.Text;
-                    replyComponents = exec.Components;   // 非 null 代表需二次確認，附上按鈕
+                    BotToken = _aes.Decrypt(bot.BotTokenEncrypted),
+                    GuildId = payload.GuildId,
+                    ChannelId = payload.ChannelId,
+                    InvokerPermissions = ParsePermissions(payload.Member?.Permissions),
+                    InvokerUserId = discordUserId,
+                    Resolved = payload.Data?.Resolved
+                };
+
+                if (_agent.Enabled)
+                {
+                    // 多步 agent：AI 可「讀訊息 → 依條件判斷 → 動作」
+                    var (reply, comps, tIn, tOut) =
+                        await RunAgentAsync(prompt, userText, ctx, bot.ModelType, bot.UserId, botId, discordUserId, CancellationToken.None);
+                    aiReply = reply;
+                    replyComponents = comps;
+                    tokensIn = tIn;
+                    tokensOut = tOut;
                 }
                 else
                 {
-                    aiReply = string.IsNullOrWhiteSpace(toolResult.TextReply)
-                        ? "（沒有可回覆的內容）"
-                        : toolResult.TextReply;
+                    // 既有單輪 function calling（Enabled=false 時等同現況）；排除僅 agent 模式可用的工具，避免回無意義錯誤
+                    var singleTurnTools = _tools.GetToolDefinitions().Where(t => !_tools.IsAgentOnlyTool(t.Name)).ToList();
+                    var toolResult = await _ai.CompleteWithToolsAsync(
+                        prompt, userText, singleTurnTools, bot.ModelType, bot.UserId, CancellationToken.None);
+                    tokensIn = toolResult.TokensIn;
+                    tokensOut = toolResult.TokensOut;
+
+                    if (toolResult.HasToolCalls)
+                    {
+                        var exec = await _tools.ExecuteAsync(toolResult.ToolCalls, ctx, CancellationToken.None);
+                        aiReply = exec.Text;
+                        replyComponents = exec.Components;
+                    }
+                    else
+                    {
+                        aiReply = string.IsNullOrWhiteSpace(toolResult.TextReply)
+                            ? "（沒有可回覆的內容）"
+                            : toolResult.TextReply;
+                    }
                 }
             }
             catch (UpstreamAiException ex)
@@ -201,16 +227,202 @@ namespace ReactL.api.Services.Webhooks
             await PatchFollowupAsync(payload.ApplicationId, payload.Token, discordReply, replyComponents);
         }
 
-        /// <summary>組裝 system prompt：Persona 設定 + 管理助理工具使用說明</summary>
-        private static string BuildSystemPrompt(string? personaPrompt)
+        /// <summary>
+        /// 多步 agent 執行：唯讀工具（含 fetch_recent_messages）自動執行並回灌；
+        /// 動作工具交由既有 ExecuteAsync（含單一動作直接執行 / 危險動作確認按鈕）。
+        /// 回傳 (回覆文字, 按鈕元件, tokensIn, tokensOut)。
+        /// </summary>
+        private async Task<(string Reply, object? Components, int TokensIn, int TokensOut)> RunAgentAsync(
+            string systemPrompt, string userText, DiscordToolContext ctx,
+            string modelType, Guid ownerUserId, Guid botId, string userId, CancellationToken ct)
+        {
+            var scanned = false;   // 本回合是否做過訊息掃描（→ 對象為 AI 解析，Phase 1 不直接執行動作）
+
+            async Task<AgentToolResponse> ExecuteTool(AiToolCall call, CancellationToken c)
+            {
+                if (!_tools.IsReadOnly(call.Name))
+                    return AgentToolResponse.Action();   // 動作工具 → 停止迴圈、交還呼叫端
+
+                if (call.Name == "fetch_recent_messages")
+                {
+                    // 發起權限閘門：AllowAnyoneInitiate=false 時，需具 Moderate Members / Administrator 才能掃描他人訊息
+                    if (!_agent.AllowAnyoneInitiate)
+                    {
+                        const ulong moderateMembers = 1UL << 40, administrator = 1UL << 3;
+                        if ((ctx.InvokerPermissions & moderateMembers) == 0 && (ctx.InvokerPermissions & administrator) == 0)
+                            return AgentToolResponse.Stop("⚠️ 你沒有權限使用掃描功能（需具管理權限）。");
+                    }
+
+                    // 掃描發起節流（僅針對掃描，一般聊天不受影響）；管理員用較短冷卻
+                    if (!PassScanThrottle(botId, userId, ctx.InvokerPermissions, out var waitSec))
+                        return AgentToolResponse.Stop($"⏳ 掃描操作過於頻繁，請 {waitSec} 秒後再試。");
+
+                    var since = ReadSinceMinutes(call.ArgumentsJson) ?? _agent.DefaultScanWindowMinutes;
+                    if (since > _agent.MaxScanWindowMinutes)
+                        return AgentToolResponse.Stop(BuildRulesRejection(since));   // 超出規範 → 硬停止並列規則
+                    since = Math.Max(1, since);
+
+                    scanned = true;
+                    var text = await _tools.ExecuteReadOnlyAsync(call, ctx, since, _agent.MaxScanMessages, c);
+                    return AgentToolResponse.FromReadOnly(text);
+                }
+
+                var qtext = await _tools.ExecuteReadOnlyAsync(call, ctx, 0, 0, c);
+                return AgentToolResponse.FromReadOnly(qtext);
+            }
+
+            // ScanModel 留空 → 用該 Bot 設定的模型；填值 → 用指定的掃描模型（成本/穩定度權衡）
+            var agentModel = string.IsNullOrWhiteSpace(_agent.ScanModel) ? modelType : _agent.ScanModel;
+            var result = await _ai.RunToolAgentAsync(
+                systemPrompt, userText, _tools.GetToolDefinitions(), agentModel, ownerUserId,
+                ExecuteTool, _agent.MaxStepsPerCommand, _agent.MaxTokensPerCommand, ct);
+
+            if (result.HasTerminalCalls)
+            {
+                // 批次動作 → 多選確認流程（過濾名單、暫存、附 User Select + 執行/取消按鈕）
+                var batchCall = result.TerminalToolCalls!.FirstOrDefault(c => _tools.IsBatchTool(c.Name));
+                if (batchCall is not null)
+                {
+                    var conf = await _tools.BuildBatchConfirmationAsync(batchCall, ctx, ct);
+                    return (conf.Text, conf.Components, result.TokensIn, result.TokensOut);
+                }
+
+                // 安全邊界：掃描過（對象由 AI 判斷）但 AI 用了非批次動作 → 不直接執行，列名單提示改用批次
+                if (scanned)
+                {
+                    var targets = ExtractMentionTargets(result.TerminalToolCalls!);
+                    var list = targets.Count > 0 ? string.Join("、", targets.Select(t => $"<@{t}>")) : "（無法解析對象）";
+                    return ($"🔍 已依條件分析訊息，AI 判斷符合的對象：{list}\n"
+                            + "（對多人的動作請使用批次指令以套用確認流程，或改用明確 @ 指定單一對象。）",
+                            null, result.TokensIn, result.TokensOut);
+                }
+
+                // 明確單一對象 → 沿用既有 ExecuteAsync（單一動作直接執行 / 危險動作確認按鈕）
+                var exec = await _tools.ExecuteAsync(result.TerminalToolCalls!, ctx, ct);
+                return (exec.Text, exec.Components, result.TokensIn, result.TokensOut);
+            }
+            if (!string.IsNullOrWhiteSpace(result.FinalText))
+                return (result.FinalText!, null, result.TokensIn, result.TokensOut);
+            if (result.Aborted)
+                return ("（這個請求太複雜或範圍太大，請縮小條件或時間範圍後再試）", null, result.TokensIn, result.TokensOut);
+            return ("（沒有可回覆的內容）", null, result.TokensIn, result.TokensOut);
+        }
+
+        /// <summary>從工具參數 JSON 讀取 since_minutes（缺/格式錯誤回 null）。</summary>
+        private static int? ReadSinceMinutes(string argsJson)
+        {
+            try
+            {
+                using var doc = JsonDocument.Parse(argsJson);
+                if (doc.RootElement.TryGetProperty("since_minutes", out var el))
+                {
+                    if (el.ValueKind == JsonValueKind.Number && el.TryGetInt32(out var v)) return v;
+                    if (el.ValueKind == JsonValueKind.String && int.TryParse(el.GetString(), out var sv)) return sv;
+                }
+            }
+            catch { /* 格式異常忽略 */ }
+            return null;
+        }
+
+        /// <summary>從動作工具呼叫萃取被指定的使用者 ID（target 單一 / targets 陣列；支援 &lt;@id&gt; 提及格式）。</summary>
+        private static List<string> ExtractMentionTargets(IReadOnlyList<AiToolCall> calls)
+        {
+            var ids = new List<string>();
+
+            static void AddId(List<string> list, string? raw)
+            {
+                if (string.IsNullOrWhiteSpace(raw)) return;
+                var digits = new string(raw.Where(char.IsDigit).ToArray());
+                var id = digits.Length > 0 ? digits : raw.Trim();
+                if (!list.Contains(id)) list.Add(id);
+            }
+
+            foreach (var call in calls)
+            {
+                try
+                {
+                    using var doc = JsonDocument.Parse(call.ArgumentsJson);
+                    var root = doc.RootElement;
+                    if (root.TryGetProperty("target", out var t) && t.ValueKind == JsonValueKind.String)
+                        AddId(ids, t.GetString());
+                    if (root.TryGetProperty("targets", out var arr) && arr.ValueKind == JsonValueKind.Array)
+                        foreach (var e in arr.EnumerateArray())
+                            if (e.ValueKind == JsonValueKind.String) AddId(ids, e.GetString());
+                }
+                catch { /* 參數格式異常忽略 */ }
+            }
+            return ids;
+        }
+
+        /// <summary>組「已超出系統設定規範」拒絕訊息，動態列出目前規則。</summary>
+        private string BuildRulesRejection(int requestedMinutes) =>
+            "⚠️ 已超出系統設定規範，未執行。目前規範：\n"
+            + $"• 掃描時間：最多 {_agent.MaxScanWindowMinutes} 分鐘（你要求了 {requestedMinutes} 分鐘）❌\n"
+            + $"• 單次最多分析：{_agent.MaxScanMessages} 則訊息\n"
+            + $"• 單次最多影響：{_agent.MaxBatchTargets} 人\n"
+            + "請縮小時間範圍後再試。";
+
+        /// <summary>掃描發起節流（每人冷卻）；管理員用較短冷卻，一般成員用標準冷卻。以 IMemoryCache 記錄截止時間。</summary>
+        private bool PassScanThrottle(Guid botId, string userId, ulong invokerPermissions, out int waitSeconds)
+        {
+            waitSeconds = 0;
+            // 具 Moderate Members 或 Administrator 視為管理員，套用較短冷卻
+            const ulong moderateMembers = 1UL << 40, administrator = 1UL << 3;
+            var isAdmin = (invokerPermissions & moderateMembers) != 0 || (invokerPermissions & administrator) != 0;
+            var cooldown = isAdmin ? _agent.InitiateCooldownSecondsForAdmin : _agent.InitiateCooldownSeconds;
+            if (cooldown <= 0) return true;
+            var key = $"dcagent:scan:{botId}:{userId}";
+            var now = DateTimeOffset.UtcNow;
+            if (_cache.TryGetValue<DateTimeOffset>(key, out var until) && until > now)
+            {
+                waitSeconds = (int)Math.Ceiling((until - now).TotalSeconds);
+                return false;
+            }
+            var end = now.AddSeconds(cooldown);
+            _cache.Set(key, end, end);
+            return true;
+        }
+
+        /// <summary>
+        /// 組裝 system prompt：Persona 設定 + 管理助理工具使用說明。
+        /// agentEnabled=false（單輪模式）時不提掃描/批次工具，並明令不可用其他動作（如刪訊息）代替「依條件找人」。
+        /// </summary>
+        private static string BuildSystemPrompt(string? personaPrompt, bool agentEnabled)
         {
             var basePrompt = string.IsNullOrWhiteSpace(personaPrompt)
                 ? "你是一個友善的 AI 助理，請用繁體中文回答使用者的問題。"
                 : personaPrompt;
 
-            return basePrompt
+            var common = basePrompt
                 + "\n\n你同時是這個 Discord 伺服器的管理助理。當使用者要求執行管理動作（例如禁言、解除禁言）時，"
-                + "呼叫對應的工具；target 參數請原樣使用使用者訊息中的 <@數字> 提及格式。"
+                + "呼叫對應的工具；target 參數請原樣使用使用者訊息中的 <@數字> 提及格式。";
+
+            if (!agentEnabled)
+            {
+                // 單輪模式：沒有掃描訊息找人的能力
+                return common
+                    + "你目前只能對『使用者明確 @ 指定的單一對象』執行動作。"
+                    + "若使用者要求對『依條件找出的一群人』操作（例如「把講髒話的人禁言」），請直接用文字回覆："
+                    + "此進階功能（掃描訊息找人）目前未啟用，請改為明確 @ 指定對象。"
+                    + "【嚴禁】絕對不可改用刪除訊息（purge）、慢速或其他動作來代替使用者的原始需求。"
+                    + "若使用者只是聊天或詢問一般問題，就正常用文字回覆，不要呼叫工具。";
+            }
+
+            return common
+                + "若使用者要對『符合某條件的一群人』操作、但沒有明確 @ 指定對象（例如「把講髒話的人禁言」），"
+                + "請先呼叫 fetch_recent_messages 讀取近期訊息，依條件自行判斷出符合的成員。"
+                + "【範圍】fetch_recent_messages 只會掃『目前這個頻道』的訊息，不是整個伺服器；"
+                + "找人一律用 fetch_recent_messages，絕對不要用 list_channels 來找人。"
+                + "若使用者要求『整個伺服器』或其他頻道的範圍，請說明目前只能掃『你下指令所在的這個頻道』，"
+                + "並就此頻道處理，或請他到目標頻道再下一次指令，不要改去列頻道清單。"
+                + "呼叫 fetch_recent_messages 時，除非使用者明確講出具體時間數字（如「最近 30 分鐘」），否則請『省略』since_minutes 參數讓系統用預設範圍，不要自己猜一個時間。"
+                + "要對『多位』成員禁言時，請呼叫 timeout_members（批次），把所有對象的 <@數字> 放進 targets 陣列一次帶入，"
+                + "不要逐一呼叫 timeout_member；要對多人解除禁言則用 remove_timeout_members。"
+                + "【重要】判斷出對象後，請『直接呼叫』timeout_members / remove_timeout_members 工具來執行；"
+                + "呼叫這些工具時，系統會自動跳出含勾選清單與『執行/取消』按鈕的確認訊息讓使用者確認。"
+                + "所以你『絕對不要』用文字去問「是否執行」「需要禁言嗎」，也不要只把名單列成文字等使用者回覆——"
+                + "使用者只能透過那些按鈕確認，你用文字詢問會讓整個流程卡住、無法完成。"
+                + "若工具回覆中出現「已超出系統設定規範」或要求開啟 MESSAGE CONTENT intent，請將該訊息原樣轉達使用者，不要重試或自行縮放範圍。"
                 + "若使用者只是聊天或詢問一般問題，就正常用文字回覆，不要呼叫工具。";
         }
 
@@ -246,6 +458,28 @@ namespace ReactL.api.Services.Webhooks
             }
         }
 
+        /// <summary>送出只有點擊者本人看得到的 ephemeral 訊息（不更動原訊息與按鈕）。用於權限不足等私下提示。</summary>
+        private async Task SendEphemeralFollowupAsync(string applicationId, string interactionToken, string content)
+        {
+            try
+            {
+                var client = _httpClientFactory.CreateClient();
+                var url = $"{DiscordApiBase}/webhooks/{applicationId}/{interactionToken}";
+                var payload = new { content, flags = 64 };   // 64 = EPHEMERAL（僅點擊者可見）
+                var body = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");
+                var response = await client.PostAsync(url, body, CancellationToken.None);
+                if (!response.IsSuccessStatusCode)
+                {
+                    var error = await response.Content.ReadAsStringAsync(CancellationToken.None);
+                    _logger.LogError("Discord ephemeral followup 失敗 {Status}: {Error}", (int)response.StatusCode, error);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Discord ephemeral followup 例外");
+            }
+        }
+
         /// <summary>
         /// 處理二次確認按鈕（MESSAGE_COMPONENT）：依 custom_id 執行或取消動作，並更新原訊息（移除按鈕）。
         /// 控制器已先回應 type 6（DEFERRED_UPDATE_MESSAGE），此處於背景完成執行並 PATCH 原訊息。
@@ -256,12 +490,37 @@ namespace ReactL.api.Services.Webhooks
             if (bot is null || !bot.IsEnabled) return;
 
             var customId = payload.Data?.CustomId ?? string.Empty;
+
+            // 批次確認元件（多選 selbatch / 執行 cf:batch / 取消 cf:batchx）：
+            // AllowAnyoneConfirm=false 時僅管理員可操作。非管理員 → 回 ephemeral 私訊提示，
+            // 且「完全不更動原訊息」→ 按鈕保留給管理員，避免被搶點而清掉按鈕。
+            var isBatchComponent = customId.StartsWith("selbatch:") || customId.StartsWith("cf:batch");
+            if (isBatchComponent && !_agent.AllowAnyoneConfirm)
+            {
+                var perms = ParsePermissions(payload.Member?.Permissions);
+                const ulong moderateMembers = 1UL << 40, administrator = 1UL << 3;
+                if ((perms & moderateMembers) == 0 && (perms & administrator) == 0)
+                {
+                    await SendEphemeralFollowupAsync(payload.ApplicationId, payload.Token,
+                        "⚠️ 只有具管理權限（Moderate Members）的成員可以操作此確認，請交給管理員處理。");
+                    return;   // 不更新原訊息，按鈕完整保留給管理員
+                }
+            }
+
+            // 多選變更 → 僅更新暫存勾選名單，不改訊息（type 6 已 ACK，保留確認 UI）
+            if (customId.StartsWith("selbatch:"))
+            {
+                _tools.UpdateBatchSelection(customId, payload.Data?.Values);
+                return;
+            }
+
             var ctx = new DiscordToolContext
             {
                 BotToken = _aes.Decrypt(bot.BotTokenEncrypted),
                 GuildId = payload.GuildId,
                 ChannelId = payload.ChannelId,
-                InvokerPermissions = ParsePermissions(payload.Member?.Permissions)
+                InvokerPermissions = ParsePermissions(payload.Member?.Permissions),
+                InvokerUserId = payload.Member?.User?.Id
             };
 
             string resultText;
@@ -274,6 +533,22 @@ namespace ReactL.api.Services.Webhooks
             {
                 _logger.LogError(ex, "Discord 確認動作執行失敗，BotBindingId={Id} CustomId={CustomId}", botId, customId);
                 resultText = "❌ 執行失敗，請稍後再試。";
+            }
+
+            // 批次動作審計：將執行結果摘要寫入監控紀錄（出現在後台監控頁）
+            if (customId.StartsWith("cf:batch:"))
+            {
+                _db.ExternalMessages.Add(new ExternalMessage
+                {
+                    BotBindingId      = botId,
+                    Platform          = Platform.Discord,
+                    ExternalUserId    = payload.Member?.User?.Id ?? "system",
+                    ExternalChannelId = payload.ChannelId,
+                    SenderName        = payload.Member?.User?.Username,
+                    Role              = MessageRole.Assistant,
+                    Content           = $"[批次動作（已確認）] {resultText}"
+                });
+                await _db.SaveChangesAsync(CancellationToken.None);
             }
 
             // 更新原訊息為結果，並以空 components 清除按鈕（避免重複點擊）

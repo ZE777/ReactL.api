@@ -26,7 +26,7 @@ namespace ReactL.api.Controllers.Admin.Personas
         [ProducesResponseType(typeof(ApiResponse<List<PersonaListItem>>), 200)]
         public async Task<IActionResult> GetList()
         {
-            var domains = await _personaService.GetListAsync(User.GetUserId());
+            var domains = await _personaService.GetListAsync(User.GetUserId(), User.IsInRole("Admin"));
 
             // 將業務 Domain 清單對應為 Response DTO 清單（輕量版，不含完整 SystemPrompt）
             var result = domains.Select(d => new PersonaListItem
@@ -52,7 +52,7 @@ namespace ReactL.api.Controllers.Admin.Personas
         [ProducesResponseType(typeof(ApiResponse<PersonaDetailResponse>), 200)]
         public async Task<IActionResult> GetById(Guid id)
         {
-            var domain = await _personaService.GetByIdAsync(id, User.GetUserId());
+            var domain = await _personaService.GetByIdAsync(id, User.GetUserId(), User.IsInRole("Admin"));
             var result = ToDetailResponse(domain);
             return Ok(ApiResponse<PersonaDetailResponse>.Ok(result));
         }
@@ -90,7 +90,7 @@ namespace ReactL.api.Controllers.Admin.Personas
         [ProducesResponseType(typeof(ApiResponse<object>), 200)]
         public async Task<IActionResult> Delete(Guid id)
         {
-            await _personaService.DeleteAsync(id, User.GetUserId());
+            await _personaService.DeleteAsync(id, User.GetUserId(), User.IsInRole("Admin"));
             return Ok(ApiResponse<object>.Ok(null!, "Persona 已刪除"));
         }
 
@@ -101,7 +101,7 @@ namespace ReactL.api.Controllers.Admin.Personas
         [ProducesResponseType(typeof(ApiResponse<List<PersonaVersionItem>>), 200)]
         public async Task<IActionResult> GetVersions(Guid personaId)
         {
-            var domains = await _personaService.GetVersionsAsync(personaId, User.GetUserId());
+            var domains = await _personaService.GetVersionsAsync(personaId, User.GetUserId(), User.IsInRole("Admin"));
 
             // 將版本 Domain 清單對應為 Response DTO 清單
             var result = domains.Select(v => new PersonaVersionItem
@@ -120,7 +120,7 @@ namespace ReactL.api.Controllers.Admin.Personas
         [ProducesResponseType(typeof(ApiResponse<PersonaVersionDetailResponse>), 200)]
         public async Task<IActionResult> GetVersionDetail(Guid personaId, Guid versionId)
         {
-            var domain = await _personaService.GetVersionDetailAsync(personaId, versionId, User.GetUserId());
+            var domain = await _personaService.GetVersionDetailAsync(personaId, versionId, User.GetUserId(), User.IsInRole("Admin"));
 
             // 將版本 Domain 對應為詳情 Response DTO
             var result = new PersonaVersionDetailResponse
@@ -140,7 +140,7 @@ namespace ReactL.api.Controllers.Admin.Personas
         [ProducesResponseType(typeof(ApiResponse<PersonaDetailResponse>), 200)]
         public async Task<IActionResult> Rollback(Guid personaId, Guid versionId)
         {
-            var domain = await _personaService.RollbackAsync(personaId, versionId, User.GetUserId());
+            var domain = await _personaService.RollbackAsync(personaId, versionId, User.GetUserId(), User.IsInRole("Admin"));
             var result = ToDetailResponse(domain);
             return Ok(ApiResponse<PersonaDetailResponse>.Ok(result));
         }

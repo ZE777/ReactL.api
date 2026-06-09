@@ -169,6 +169,56 @@ namespace ReactL.api.Services.Webhooks
 
         // ── 共用 ──────────────────────────────────────────────────────────────
 
+        public async Task<RecentMessagesResult> FetchRecentMessagesAsync(
+            string botToken, string channelId, int sinceMinutes, int maxMessages, CancellationToken ct = default)
+        {
+            var cutoff = DateTimeOffset.UtcNow.AddMinutes(-Math.Max(1, sinceMinutes));
+            var collected = new List<RecentMessage>();
+            string? before = null;
+            bool humanSeen = false, nonEmptyHumanSeen = false;
+
+            // Discord 回傳新→舊，每頁最多 100 則；以 before 游標往更舊翻
+            while (collected.Count < maxMessages)
+            {
+                var path = $"/channels/{channelId}/messages?limit=100" + (before is null ? "" : $"&before={before}");
+                var (ok, json, status) = await GetAsync(botToken, path, ct);
+                if (!ok)
+                    return new RecentMessagesResult(false, $"無法讀取頻道訊息（Discord 回應 {(int)status}）", collected, false);
+
+                using var doc = JsonDocument.Parse(json);
+                var arr = doc.RootElement;
+                if (arr.ValueKind != JsonValueKind.Array || arr.GetArrayLength() == 0) break;
+
+                int pageCount = 0; string? lastId = null; bool reachedCutoff = false;
+                foreach (var m in arr.EnumerateArray())
+                {
+                    pageCount++;
+                    lastId = m.TryGetProperty("id", out var idEl) ? idEl.GetString() : null;
+                    var ts = m.TryGetProperty("timestamp", out var tEl) && DateTimeOffset.TryParse(tEl.GetString(), out var d)
+                        ? d : DateTimeOffset.UtcNow;
+                    if (ts < cutoff) { reachedCutoff = true; break; }
+
+                    var author = m.TryGetProperty("author", out var aEl) ? aEl : default;
+                    var authorId = author.ValueKind == JsonValueKind.Object && author.TryGetProperty("id", out var aid) ? (aid.GetString() ?? "") : "";
+                    var authorName = author.ValueKind == JsonValueKind.Object && author.TryGetProperty("username", out var un) ? (un.GetString() ?? "") : "";
+                    var isBot = author.ValueKind == JsonValueKind.Object && author.TryGetProperty("bot", out var bEl) && bEl.ValueKind == JsonValueKind.True;
+                    var content = m.TryGetProperty("content", out var cEl) ? (cEl.GetString() ?? "") : "";
+
+                    if (!isBot) { humanSeen = true; if (content.Length > 0) nonEmptyHumanSeen = true; }
+
+                    collected.Add(new RecentMessage(authorId, authorName, isBot, content, ts));
+                    if (collected.Count >= maxMessages) break;
+                }
+
+                before = lastId;
+                if (reachedCutoff || pageCount < 100 || before is null) break; // 到 cutoff / 最後一頁 / 無游標
+            }
+
+            // MESSAGE CONTENT intent 偵測：有真人訊息卻內容全空
+            var contentMissing = humanSeen && !nonEmptyHumanSeen;
+            return new RecentMessagesResult(true, null, collected, contentMissing);
+        }
+
         private async Task<(bool Ok, string Json, HttpStatusCode Status)> GetAsync(string botToken, string path, CancellationToken ct)
         {
             try
