@@ -23,6 +23,27 @@ ASP.NET Core 8 後端 API，提供 AI Prompt 管理、多輪對話、Persona 角
 
 ---
 
+## 技術應用概要
+
+> 技術選型 → **實際應用於本專案的什麼地方**。實作層細節見 [`workflows/backend-tech-overview.md`](workflows/backend-tech-overview.md) 與 [`workflows/database-schema-and-dataflow.md`](workflows/database-schema-and-dataflow.md)。
+
+| 技術 | 在本專案的應用 |
+|------|---------------|
+| **ASP.NET Core 8（Controllers）** | `Controller → Service → AppDbContext` 三層；路由分 `Admin/`（需 JWT）、`Web/`（公開前台）、`Webhooks/`（免 JWT、平台簽章驗證）|
+| **EF Core 8（Code First + Fluent API）** | Entity 配置集中於 `AppDbContext.OnModelCreating`；軟刪除全域 `HasQueryFilter`、複合唯一索引、`SetNull`/`Cascade` 外鍵 |
+| **SqlScripts 版本化腳本** | 取代 EF Migration：`Init/V001` → `Migrations/Vnnn` → `Seed/`，皆冪等（`IF NOT EXISTS`）|
+| **SQL Server** | 主資料庫；`TokenUsageStats` 以複合唯一鍵做每日用量 UPSERT |
+| **JWT Bearer（HMAC-SHA256）** | 後台登入授權；`ClaimsPrincipalExtensions` 取 `UserId`/`Role`/`IsAdmin`；ClockSkew 1 分鐘 |
+| **BCrypt.Net-Next** | 使用者密碼不可逆雜湊；登入回傳統一錯誤防帳號列舉 |
+| **AES-256-CBC（`AesEncryptionHelper`，Singleton）** | Bot Token / Channel Secret / AI 金鑰加密儲存，前端僅見後 4 碼（只進不出）|
+| **NSec.Cryptography（Ed25519）** | Discord Interactions Webhook 簽章驗證（LINE 則 HMAC-SHA256）|
+| **OpenAI 相容 API + SSE** | `OpenAiService` 以 `IAsyncEnumerable` 串流多 Provider（Groq/Mistral/Cerebras/SambaNova）；混合 BYOK 金鑰解析（自帶 → 系統預設）|
+| **Serilog** | Console + 每日滾動檔案（30 天保留）；`ExceptionMiddleware` 分級記錄 |
+| **Swagger / OpenAPI 3** | 由 XML 文件產生 API 文件，附 JWT 登入框 |
+| **健康檢查** | `GET /health` 檢查 API 與資料庫連線 |
+
+---
+
 ## 功能模組
 
 | 路由前綴 | 功能說明 |

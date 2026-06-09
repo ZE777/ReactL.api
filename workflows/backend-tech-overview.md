@@ -1,9 +1,10 @@
 # ReactL.api 後端技術總覽
 
-> 最後更新：2026-06-05
+> 最後更新：2026-06-09
 > 專案：ReactL Prompt Studio（後台 API）
 > 框架：ASP.NET Core 8.0 / .NET 8
 > Schema 管理：SqlScripts 版本化腳本（EF Migration 已於 2026-06-05 移除）
+> 技術選型概要見 `README.md` 的「技術應用概要」；本文件為實作層細節。前端對應文件：`ReactL`（前端 repo）`docs/前端實作細節.md`。
 
 ---
 
