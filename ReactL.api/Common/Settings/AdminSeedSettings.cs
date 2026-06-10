@@ -14,8 +14,8 @@ namespace ReactL.api.Common.Settings
         /// <summary>種子 Admin 的登入 Email</summary>
         public string Email { get; set; } = "admin@reactl.local";
 
-        /// <summary>種子 Admin 的預設密碼（首登後強制變更）</summary>
-        public string DefaultPassword { get; set; } = "Admin@12345";
+        /// <summary>種子 Admin 的預設密碼（敏感，留空不寫死；由 appsettings.Development/Production.json 或環境變數提供；首登後強制變更）</summary>
+        public string DefaultPassword { get; set; } = "";
 
         /// <summary>種子 Admin 的顯示名稱</summary>
         public string DisplayName { get; set; } = "管理員";
