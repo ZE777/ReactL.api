@@ -21,6 +21,9 @@ namespace ReactL.api.Services.Webhooks
         /// <summary>QRY-01 查成員資訊（暱稱、加入時間、身分組數、禁言狀態）</summary>
         Task<QueryResult> GetMemberInfoAsync(string botToken, string guildId, string userId, CancellationToken ct = default);
 
+        /// <summary>取得成員的顯示名稱（伺服器暱稱 &gt; 全域顯示名 &gt; 使用者名）。查不到/離開伺服器回 null。</summary>
+        Task<string?> GetMemberDisplayNameAsync(string botToken, string guildId, string userId, CancellationToken ct = default);
+
         /// <summary>QRY-02 查成員的禁言 / 封鎖狀態</summary>
         Task<QueryResult> GetMemberStatusAsync(string botToken, string guildId, string userId, CancellationToken ct = default);
 

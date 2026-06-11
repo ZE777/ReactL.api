@@ -43,6 +43,27 @@ namespace ReactL.api.Services.Webhooks
             return new QueryResult(true, sb.ToString());
         }
 
+        public async Task<string?> GetMemberDisplayNameAsync(string botToken, string guildId, string userId, CancellationToken ct = default)
+        {
+            var (ok, json, _) = await GetAsync(botToken, $"/guilds/{guildId}/members/{userId}", ct);
+            if (!ok) return null;
+
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+
+            // 伺服器暱稱 > 全域顯示名 > 使用者名
+            if (root.TryGetProperty("nick", out var nick) && nick.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(nick.GetString()))
+                return nick.GetString();
+            if (root.TryGetProperty("user", out var u))
+            {
+                if (u.TryGetProperty("global_name", out var gn) && gn.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(gn.GetString()))
+                    return gn.GetString();
+                if (u.TryGetProperty("username", out var un) && un.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(un.GetString()))
+                    return un.GetString();
+            }
+            return null;
+        }
+
         public async Task<QueryResult> GetMemberStatusAsync(string botToken, string guildId, string userId, CancellationToken ct = default)
         {
             // 禁言狀態（從 member 取 communication_disabled_until）

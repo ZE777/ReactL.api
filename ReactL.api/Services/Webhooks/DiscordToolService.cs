@@ -383,19 +383,22 @@ namespace ReactL.api.Services.Webhooks
                 },
                 0),
 
-            // ── 信任名單（動態白名單）：只有「主人」(OwnerDiscordUserId) 能維護 ──────
+            // ── 信任名單（動態白名單）：只有「管理者」(系統角色 owner，可多位) 能維護 ──────
+            // 對話路徑只動「信任者」；新增/移除「管理者」一律後台維護。
             new ToolSpec(
                 "add_trusted_user",
-                "把一位使用者加入『主人的信任名單』。只有 Bot 的主人本人能使用。" +
-                "當主人說「信任他／他是朋友／他是爹地／把他加入信任名單」時呼叫。加入前會跳出確認按鈕。",
+                "把一位使用者加入信任名單（成為『信任者』）。只有這個 Bot 的管理者本人（後台設定，可多位）能使用。" +
+                "當管理者表達要把某人納入信任、加入信任名單、或視為自己人／信任對象時就呼叫——" +
+                "不論管理者用哪種關係稱呼或語氣，關係詞本身不是觸發條件，重點是『管理者想新增一位信任對象』。" +
+                "若只是稱讚、打招呼、單純聊到某人而沒有要納入信任，則不要呼叫。加入前會跳確認按鈕由管理者最終確認。",
                 new
                 {
                     type = "object",
                     properties = new
                     {
                         target = new { type = "string", description = "要信任的對象，使用 Discord 提及格式 <@使用者ID>" },
-                        label = new { type = "string", description = "對象的稱呼/名字（例如「小明」），供記憶與顯示" },
-                        tier = new { type = "string", description = "關係標籤（可選，例如「爹地」「朋友」「二爹地」）" }
+                        // 名稱不由模型填：系統會自動帶入對象的 Discord 名稱，避免名稱被填成關係詞
+                        tier = new { type = "string", description = "關係標籤（可選）：管理者對該對象的自訂稱呼，依當前角色設定與管理者說法填入，不限定特定詞；管理者沒明講就留空。" }
                     },
                     required = new[] { "target" }
                 },
@@ -403,20 +406,21 @@ namespace ReactL.api.Services.Webhooks
 
             new ToolSpec(
                 "remove_trusted_user",
-                "把一位使用者從『主人的信任名單』移除。只有 Bot 的主人本人能使用。" +
-                "當主人說「不要信任他了／把他移出信任名單」時呼叫。",
+                "把一位『信任者』從信任名單移除。只有這個 Bot 的管理者本人（後台設定，可多位）能使用。" +
+                "當管理者表達要把某人移出信任名單、不再信任某人時就呼叫。" +
+                "只能移除『信任者』；名單中的『管理者』一律請到後台維護，不在對話中更動。移除前會跳確認按鈕由管理者最終確認。",
                 new
                 {
                     type = "object",
                     properties = new { target = new { type = "string", description = "要移除的對象 <@使用者ID>" } },
                     required = new[] { "target" }
                 },
-                0),
+                0, RequiresConfirmation: true),
 
             new ToolSpec(
                 "list_trusted_users",
-                "列出『主人的信任名單』目前有哪些人。只有 Bot 的主人本人能查看。" +
-                "當主人問「你信任哪些人／信任名單有誰」時呼叫。",
+                "列出信任名單目前有哪些人。只有這個 Bot 的管理者本人（後台設定，可多位）能查看。" +
+                "當管理者想查看目前信任名單時就呼叫。",
                 new { type = "object", properties = new { } },
                 0),
 
@@ -653,14 +657,15 @@ namespace ReactL.api.Services.Webhooks
             {
                 case "add_trusted_user":
                 {
-                    // 主人閘門：僅「系統角色為主人」的成員能維護（code 層，非靠 prompt）
+                    // 管理者閘門：僅「系統角色為管理者」的成員能維護（code 層，非靠 prompt）
                     var gate = await CheckOwnerAsync(ctx, ct);
                     if (gate is not null) { text = gate; break; }
 
                     var uid = ResolveTargetUserId(a, ctx);
                     if (uid is null) { text = "⚠️ 找不到要信任的對象，請用 @提及 指定。"; break; }
 
-                    var label = GetString(a, "label")?.Trim();
+                    // 名稱一律以「被加入者的 Discord 名稱」為準（伺服器暱稱>全域名>使用者名），不由模型填；查不到才退回 null（最終以 ID 顯示）
+                    var label = await _query.GetMemberDisplayNameAsync(ctx.BotToken, ctx.GuildId!, uid, ct);
                     var tier = GetString(a, "tier")?.Trim();
                     if (string.IsNullOrWhiteSpace(label)) label = null;
                     if (string.IsNullOrWhiteSpace(tier)) tier = null;
@@ -671,8 +676,28 @@ namespace ReactL.api.Services.Webhooks
                         TimeSpan.FromMinutes(Math.Max(1, _agent.PendingTtlMinutes)));
 
                     var who = label is null ? $"<@{uid}>" : $"<@{uid}>（{label}{(tier is null ? "" : "・" + tier)}）";
-                    text = $"🤝 即將把 {who} 加入主人的信任名單，確認？";
+                    text = $"🤝 即將把 {who} 加入信任名單（信任者），確認？";
                     customId = $"cf:trustadd:{token}";
+                    break;
+                }
+                case "remove_trusted_user":
+                {
+                    // 管理者閘門：僅「系統角色為管理者」的成員能維護（code 層，非靠 prompt）
+                    var gate = await CheckOwnerAsync(ctx, ct);
+                    if (gate is not null) { text = gate; break; }
+
+                    var uid = ResolveTargetUserId(a, ctx);
+                    if (uid is null) { text = "⚠️ 找不到要移除的對象，請用 @提及 指定。"; break; }
+
+                    // 對話只能移除「信任者」：對象不在名單→無須移除；對象為管理者→拒絕，導去後台
+                    var member = await _trust.FindAsync(ctx.BotBindingId, uid, ct);
+                    if (member is null) { text = $"（<@{uid}> 本來就不在信任名單內。）"; break; }
+                    if (member.SystemRole == TrustRole.Owner)
+                    { text = "⚠️ 對方是『管理者』，不能在對話中移除；請到後台維護管理者名單。"; break; }
+
+                    var who = string.IsNullOrWhiteSpace(member.Label) ? $"<@{uid}>" : $"<@{uid}>（{member.Label}）";
+                    text = $"🗑️ 即將把 {who} 移出信任名單，確認？";
+                    customId = $"cf:trustrm:{uid}";
                     break;
                 }
                 case "kick_member":
@@ -735,14 +760,16 @@ namespace ReactL.api.Services.Webhooks
                 }
             }
 
+            // 信任確認用專屬取消 id（cf:trustx），讓非管理者連「取消」也搶不走（與執行鈕同一道閘門）
+            var cancelId = customId is not null && customId.StartsWith("cf:trust") ? "cf:trustx" : "cfx";
             return customId is null
                 ? new ToolExecutionResult(text ?? "⚠️ 無法建立確認。")     // 參數錯誤 → 純文字、無按鈕
-                : new ToolExecutionResult(text!, BuildConfirmComponents(customId));
+                : new ToolExecutionResult(text!, BuildConfirmComponents(customId, cancelId));
         }
 
         public async Task<string?> ExecuteConfirmedAsync(string customId, DiscordToolContext ctx, CancellationToken ct = default)
         {
-            if (customId == "cfx") return "已取消操作。";
+            if (customId == "cfx" || customId == "cf:trustx") return "已取消操作。";
             if (!customId.StartsWith("cf:")) return null;     // 非本服務的確認按鈕
 
             var p = customId.Split(':');
@@ -754,6 +781,8 @@ namespace ReactL.api.Services.Webhooks
             {
                 case "trustadd":
                     return await ExecuteTrustAddConfirmedAsync(p[2], ctx, ct);
+                case "trustrm":
+                    return await ExecuteTrustRemoveConfirmedAsync(p[2], ctx, ct);
                 case "batch":
                     return await ExecuteBatchConfirmedAsync(p[2], ctx, ct);
                 case "batchx":
@@ -791,7 +820,7 @@ namespace ReactL.api.Services.Webhooks
         private static int ParseIntOr(string[] parts, int index, int fallback) =>
             parts.Length > index && int.TryParse(parts[index], out var v) ? v : fallback;
 
-        private static object BuildConfirmComponents(string confirmCustomId) => new object[]
+        private static object BuildConfirmComponents(string confirmCustomId, string cancelCustomId = "cfx") => new object[]
         {
             new
             {
@@ -799,7 +828,7 @@ namespace ReactL.api.Services.Webhooks
                 components = new object[]
                 {
                     new { type = 2, style = 4, label = "確認", custom_id = confirmCustomId },  // style 4 = danger
-                    new { type = 2, style = 2, label = "取消", custom_id = "cfx" }              // style 2 = secondary
+                    new { type = 2, style = 2, label = "取消", custom_id = cancelCustomId }     // style 2 = secondary
                 }
             }
         };
@@ -840,7 +869,7 @@ namespace ReactL.api.Services.Webhooks
                 "list_roles" => (await _query.ListRolesAsync(ctx.BotToken, ctx.GuildId!, QUERY_LIST_LIMIT, cancellationToken)).Text,
                 "view_audit_log" => (await _query.GetAuditLogAsync(ctx.BotToken, ctx.GuildId!, AUDIT_LOG_LIMIT, cancellationToken)).Text,
                 "send_message" => await HandleSendMessageAsync(args.RootElement, ctx, cancellationToken),
-                "remove_trusted_user" => await HandleRemoveTrustedAsync(args.RootElement, ctx, cancellationToken),
+                // remove_trusted_user 走二次確認流程（BuildConfirmationAsync → cf:trustrm），不在此直接執行
                 "list_trusted_users" => await HandleListTrustedAsync(ctx, cancellationToken),
                 _ => $"⚠️ 尚未實作的功能：{call.Name}"
             };
@@ -851,17 +880,17 @@ namespace ReactL.api.Services.Webhooks
         /// <summary>待確認的「加入信任」動作（暫存於 IMemoryCache，token 為 key）。</summary>
         private record PendingTrust(string UserId, string? Label, string? Tier);
 
-        /// <summary>主人閘門：信任名單維護僅限「系統角色為主人」的成員（可多人）。回 null=通過，否則為拒絕訊息。</summary>
+        /// <summary>管理者閘門：信任名單維護僅限「系統角色為管理者」的成員（可多位）。回 null=通過，否則為拒絕訊息。</summary>
         private async Task<string?> CheckOwnerAsync(DiscordToolContext ctx, CancellationToken ct)
         {
             if (string.IsNullOrWhiteSpace(ctx.InvokerUserId))
                 return "⚠️ 無法辨識你的身分，無法維護信任名單。";
             if (!await _trust.IsOwnerAsync(ctx.BotBindingId, ctx.InvokerUserId, ct))
-                return "⚠️ 只有名單中『系統角色為主人』的成員能維護信任名單。請主人先在後台指定主人，或由現任主人操作。";
+                return "⚠️ 只有名單中『系統角色為管理者』的成員能維護信任名單。請先在後台指定管理者，或由現任管理者操作。";
             return null;
         }
 
-        /// <summary>按下〔確認〕加入信任：重新把關主人身分、取出暫存資料、以「信任者」角色寫入名單。</summary>
+        /// <summary>按下〔確認〕加入信任：重新把關管理者身分、取出暫存資料、以「信任者」角色寫入名單。</summary>
         private async Task<string> ExecuteTrustAddConfirmedAsync(string token, DiscordToolContext ctx, CancellationToken ct)
         {
             var gate = await CheckOwnerAsync(ctx, ct);
@@ -890,14 +919,17 @@ namespace ReactL.api.Services.Webhooks
             return added ? $"✅ 已把 {who} 加入信任名單。" : $"✅ 已更新 {who} 的信任資料。";
         }
 
-        /// <summary>移除信任對象（主人限定，立即執行、不需確認）。</summary>
-        private async Task<string> HandleRemoveTrustedAsync(JsonElement args, DiscordToolContext ctx, CancellationToken ct)
+        /// <summary>按下〔確認〕移除信任：重新把關管理者身分、再確認對象為「信任者」後移出名單（對話不得移除管理者）。</summary>
+        private async Task<string> ExecuteTrustRemoveConfirmedAsync(string uid, DiscordToolContext ctx, CancellationToken ct)
         {
             var gate = await CheckOwnerAsync(ctx, ct);
             if (gate is not null) return gate;
 
-            var uid = ResolveTargetUserId(args, ctx);
-            if (uid is null) return "⚠️ 找不到要移除的對象，請用 @提及 指定。";
+            // 點擊確認時再判一次：對象若已不在名單或已是管理者，皆不在對話中移除
+            var member = await _trust.FindAsync(ctx.BotBindingId, uid, ct);
+            if (member is null) return $"（<@{uid}> 本來就不在信任名單內。）";
+            if (member.SystemRole == TrustRole.Owner)
+                return "⚠️ 對方是『管理者』，不能在對話中移除；請到後台維護管理者名單。";
 
             var removed = await _trust.RemoveAsync(ctx.BotBindingId, uid, ct);
             if (removed)
@@ -905,7 +937,7 @@ namespace ReactL.api.Services.Webhooks
             return removed ? $"✅ 已把 <@{uid}> 移出信任名單。" : $"（<@{uid}> 本來就不在信任名單內。）";
         }
 
-        /// <summary>列出信任名單（主人限定）。</summary>
+        /// <summary>列出信任名單（管理者限定）。</summary>
         private async Task<string> HandleListTrustedAsync(DiscordToolContext ctx, CancellationToken ct)
         {
             var gate = await CheckOwnerAsync(ctx, ct);
@@ -917,7 +949,7 @@ namespace ReactL.api.Services.Webhooks
             var sb = new StringBuilder($"目前信任名單（{list.Count} 人）：\n");
             foreach (var t in list)
             {
-                var role = t.SystemRole == TrustRole.Owner ? "主人" : "信任者";
+                var role = t.SystemRole == TrustRole.Owner ? "管理者" : "信任者";
                 sb.AppendLine($"・<@{t.Id}>{(string.IsNullOrWhiteSpace(t.Label) ? "" : $" {t.Label}")}{(string.IsNullOrWhiteSpace(t.Tier) ? "" : $"・{t.Tier}")}〔{role}〕");
             }
             return sb.ToString();
