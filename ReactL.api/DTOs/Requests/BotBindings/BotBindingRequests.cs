@@ -77,4 +77,25 @@ namespace ReactL.api.DTOs.Requests.BotBindings
         /// <summary>LINE 平台需同步更換 ChannelSecret</summary>
         public string? NewChannelSecret { get; set; }
     }
+
+    /// <summary>新增/更新信任系統成員請求（後台路徑）</summary>
+    public class AddTrustedUserRequest
+    {
+        /// <summary>對象的 Discord User ID（17~20 位數字）</summary>
+        [Required(ErrorMessage = "Discord User ID 為必填")]
+        [RegularExpression(@"^\d{17,20}$", ErrorMessage = "Discord User ID 需為 17~20 位數字")]
+        public string DiscordUserId { get; set; } = string.Empty;
+
+        /// <summary>名稱／顯示稱呼</summary>
+        [MaxLength(100)]
+        public string? Label { get; set; }
+
+        /// <summary>關係（自訂情感標籤，例如「主人」「爹地」「朋友」）</summary>
+        [MaxLength(50)]
+        public string? Tier { get; set; }
+
+        /// <summary>系統角色：'owner'（主人/管理者）或 'trusted'（信任者）；其他值一律視為 trusted</summary>
+        [MaxLength(20)]
+        public string? SystemRole { get; set; }
+    }
 }

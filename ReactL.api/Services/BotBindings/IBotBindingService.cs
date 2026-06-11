@@ -27,5 +27,14 @@ namespace ReactL.api.Services.BotBindings
 
         /// <summary>查詢 LINE Bot 本月訊息用量（呼叫 LINE Messaging API）</summary>
         Task<LineQuotaResponse> GetLineQuotaAsync(Guid id, Guid userId);
+
+        /// <summary>取得某 Bot 的信任系統成員名單（後台路徑；先驗證所有權）</summary>
+        Task<List<TrustedUserResponse>> GetTrustedUsersAsync(Guid id, Guid userId);
+
+        /// <summary>後台新增信任對象</summary>
+        Task<TrustedUserResponse> AddTrustedUserAsync(Guid id, Guid userId, AddTrustedUserRequest request);
+
+        /// <summary>後台移除信任對象</summary>
+        Task RemoveTrustedUserAsync(Guid id, Guid userId, string discordUserId);
     }
 }

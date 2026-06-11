@@ -42,6 +42,9 @@ namespace ReactL.api.Domain.BotBindings
         /// <summary>Discord Ed25519 Public Key（Discord 平台專用）</summary>
         public string? DiscordPublicKey { get; set; }
 
+        /// <summary>信任系統成員人數（摘要顯示用）</summary>
+        public int TrustedUserCount { get; set; }
+
         /// <summary>
         /// Bot 憑證/設定驗證結果（LINE/Discord 共用）：true=有效、false=無效、null=尚未驗證。
         /// 此值持久化於 DB，列表查詢也會帶出，供前端標示「設定無效」狀態。

@@ -39,6 +39,9 @@ namespace ReactL.api.DTOs.Responses.BotBindings
         /// <summary>Discord Application Public Key（Discord 平台專用）</summary>
         public string? DiscordPublicKey { get; set; }
 
+        /// <summary>信任系統成員人數（列表摘要顯示用）</summary>
+        public int TrustedUserCount { get; set; }
+
         /// <summary>
         /// Bot 憑證/設定驗證結果（持久化，LINE/Discord 共用）：true=有效、false=無效、null=尚未驗證。
         /// 前端依此在列表標示「設定無效」，重新整理後仍會顯示。
@@ -50,6 +53,28 @@ namespace ReactL.api.DTOs.Responses.BotBindings
 
         /// <summary>Bot 綁定最後更新時間</summary>
         public DateTime UpdatedAt { get; set; }
+    }
+
+    /// <summary>信任系統的單一成員（後台回應）</summary>
+    public class TrustedUserResponse
+    {
+        /// <summary>對象的 Discord User ID</summary>
+        public string Id { get; set; } = string.Empty;
+
+        /// <summary>名稱／顯示稱呼</summary>
+        public string Label { get; set; } = string.Empty;
+
+        /// <summary>關係（自訂情感標籤，例如「主人」「爹地」「朋友」）</summary>
+        public string? Tier { get; set; }
+
+        /// <summary>系統角色：'owner'（主人/管理者）或 'trusted'（信任者）</summary>
+        public string SystemRole { get; set; } = "trusted";
+
+        /// <summary>授權來源："admin"（後台）或操作的主人 Discord User ID（對話路徑）</summary>
+        public string? GrantedBy { get; set; }
+
+        /// <summary>加入時間</summary>
+        public DateTime GrantedAt { get; set; }
     }
 
     /// <summary>LINE Bot 月訊息用量（來自 LINE Messaging API）</summary>
@@ -106,6 +131,9 @@ namespace ReactL.api.DTOs.Responses.BotBindings
 
         /// <summary>Discord Application Public Key（Discord 平台專用）</summary>
         public string? DiscordPublicKey { get; set; }
+
+        /// <summary>信任系統成員人數</summary>
+        public int TrustedUserCount { get; set; }
 
         /// <summary>
         /// Bot 憑證/設定驗證結果（持久化，LINE/Discord 共用）：true=有效、false=無效、null=尚未驗證。

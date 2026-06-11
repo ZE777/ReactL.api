@@ -126,6 +126,7 @@ namespace ReactL.api.Data
                 e.Property(b => b.WebhookBaseUrl).HasMaxLength(500);
                 e.Property(b => b.DiscordApplicationId).HasMaxLength(50);
                 e.Property(b => b.DiscordPublicKey).HasMaxLength(100);
+                e.Property(b => b.TrustedUsersJson).HasColumnType("nvarchar(max)");
                 e.HasIndex(b => b.UserId).HasDatabaseName("IX_BotBindings_UserId");
                 e.HasIndex(b => b.Platform).HasDatabaseName("IX_BotBindings_Platform");
 

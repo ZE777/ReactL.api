@@ -6,6 +6,9 @@ namespace ReactL.api.Services.Webhooks
     /// <summary>執行工具所需的情境（來自 interaction payload，已解析）</summary>
     public class DiscordToolContext
     {
+        /// <summary>該 BotBinding 的 Id（信任名單讀寫的 key）</summary>
+        public Guid BotBindingId { get; set; }
+
         /// <summary>該 Bot 的 Token 明文（呼叫端解密後傳入）</summary>
         public string BotToken { get; set; } = string.Empty;
 

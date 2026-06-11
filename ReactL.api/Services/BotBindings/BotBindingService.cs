@@ -25,8 +25,9 @@ namespace ReactL.api.Services.BotBindings
         private readonly AppSettings _appSettings;
         private readonly IDiscordCommandService _discordCommand;
         private readonly ILineCredentialService _lineCredential;
+        private readonly IBotTrustService _trust;
 
-        public BotBindingService(AppDbContext db, AesEncryptionHelper aes, ILogger<BotBindingService> logger, IHttpClientFactory httpClientFactory, IOptions<AppSettings> appSettings, IDiscordCommandService discordCommand, ILineCredentialService lineCredential)
+        public BotBindingService(AppDbContext db, AesEncryptionHelper aes, ILogger<BotBindingService> logger, IHttpClientFactory httpClientFactory, IOptions<AppSettings> appSettings, IDiscordCommandService discordCommand, ILineCredentialService lineCredential, IBotTrustService trust)
         {
             _db = db;
             _aes = aes;
@@ -35,6 +36,7 @@ namespace ReactL.api.Services.BotBindings
             _appSettings = appSettings.Value;
             _discordCommand = discordCommand;
             _lineCredential = lineCredential;
+            _trust = trust;
         }
 
         /// <summary>
@@ -71,33 +73,40 @@ namespace ReactL.api.Services.BotBindings
         /// <summary>取得使用者的 Bot 綁定清單</summary>
         public async Task<List<BotBindingDomain>> GetListAsync(Guid userId)
         {
-            var list = await _db.BotBindings
+            // 連同 TrustedUsersJson 取出，於記憶體計算信任人數（EF 無法在 Select 中解析 JSON）
+            var rows = await _db.BotBindings
                 .AsNoTracking()
                 .Where(b => b.UserId == userId)
                 .OrderByDescending(b => b.CreatedAt)
-                .Select(b => new BotBindingDomain
+                .Select(b => new
                 {
-                    Id = b.Id,
-                    UserId = b.UserId,
-                    Platform = b.Platform,
-                    BotName = b.BotName,
-                    TokenLastFour = b.TokenLastFour,
-                    ModelType = b.ModelType,
-                    IsEnabled = b.IsEnabled,
-                    PersonaId = b.PersonaId,
-                    PersonaName = b.Persona != null ? b.Persona.Name : null,
-                    WebhookBaseUrl = b.WebhookBaseUrl,
-                    DiscordApplicationId = b.DiscordApplicationId,
-                    DiscordPublicKey = b.DiscordPublicKey,
-                    CredentialValid = b.CredentialValid,
-                    CreatedAt = b.CreatedAt,
-                    UpdatedAt = b.UpdatedAt
+                    b.Id, b.UserId, b.Platform, b.BotName, b.TokenLastFour, b.ModelType, b.IsEnabled,
+                    b.PersonaId, PersonaName = b.Persona != null ? b.Persona.Name : null,
+                    b.WebhookBaseUrl, b.DiscordApplicationId, b.DiscordPublicKey,
+                    b.TrustedUsersJson, b.CredentialValid, b.CreatedAt, b.UpdatedAt
                 })
                 .ToListAsync();
 
-            // WebhookUrl 在 Select 裡無法呼叫 C# 方法，於記憶體中補算
-            foreach (var item in list)
-                item.WebhookUrl = BuildWebhookUrl(item.WebhookBaseUrl, item.Platform, item.Id);
+            var list = rows.Select(b => new BotBindingDomain
+            {
+                Id = b.Id,
+                UserId = b.UserId,
+                Platform = b.Platform,
+                BotName = b.BotName,
+                TokenLastFour = b.TokenLastFour,
+                ModelType = b.ModelType,
+                IsEnabled = b.IsEnabled,
+                PersonaId = b.PersonaId,
+                PersonaName = b.PersonaName,
+                WebhookBaseUrl = b.WebhookBaseUrl,
+                DiscordApplicationId = b.DiscordApplicationId,
+                DiscordPublicKey = b.DiscordPublicKey,
+                TrustedUserCount = CountTrusted(b.TrustedUsersJson),
+                CredentialValid = b.CredentialValid,
+                CreatedAt = b.CreatedAt,
+                UpdatedAt = b.UpdatedAt,
+                WebhookUrl = BuildWebhookUrl(b.WebhookBaseUrl, b.Platform, b.Id)
+            }).ToList();
 
             return list;
         }
@@ -109,29 +118,56 @@ namespace ReactL.api.Services.BotBindings
                 .AsNoTracking()
                 .Include(b => b.Persona)
                 .Where(b => b.Id == id && b.UserId == userId)
-                .Select(b => new BotBindingDomain
+                .Select(b => new
                 {
-                    Id = b.Id,
-                    UserId = b.UserId,
-                    Platform = b.Platform,
-                    BotName = b.BotName,
-                    TokenLastFour = b.TokenLastFour,
-                    ModelType = b.ModelType,
-                    IsEnabled = b.IsEnabled,
-                    PersonaId = b.PersonaId,
-                    PersonaName = b.Persona != null ? b.Persona.Name : null,
-                    WebhookBaseUrl = b.WebhookBaseUrl,
-                    DiscordApplicationId = b.DiscordApplicationId,
-                    DiscordPublicKey = b.DiscordPublicKey,
-                    CredentialValid = b.CredentialValid,
-                    CreatedAt = b.CreatedAt,
-                    UpdatedAt = b.UpdatedAt
+                    b.Id, b.UserId, b.Platform, b.BotName, b.TokenLastFour, b.ModelType, b.IsEnabled,
+                    b.PersonaId, PersonaName = b.Persona != null ? b.Persona.Name : null,
+                    b.WebhookBaseUrl, b.DiscordApplicationId, b.DiscordPublicKey,
+                    b.TrustedUsersJson, b.CredentialValid, b.CreatedAt, b.UpdatedAt
                 })
                 .FirstOrDefaultAsync()
                 ?? throw new NotFoundException("BotBinding", id);
 
-            b.WebhookUrl = BuildWebhookUrl(b.WebhookBaseUrl, b.Platform, b.Id);
-            return b;
+            return new BotBindingDomain
+            {
+                Id = b.Id,
+                UserId = b.UserId,
+                Platform = b.Platform,
+                BotName = b.BotName,
+                TokenLastFour = b.TokenLastFour,
+                ModelType = b.ModelType,
+                IsEnabled = b.IsEnabled,
+                PersonaId = b.PersonaId,
+                PersonaName = b.PersonaName,
+                WebhookBaseUrl = b.WebhookBaseUrl,
+                DiscordApplicationId = b.DiscordApplicationId,
+                DiscordPublicKey = b.DiscordPublicKey,
+                TrustedUserCount = CountTrusted(b.TrustedUsersJson),
+                CredentialValid = b.CredentialValid,
+                CreatedAt = b.CreatedAt,
+                UpdatedAt = b.UpdatedAt,
+                WebhookUrl = BuildWebhookUrl(b.WebhookBaseUrl, b.Platform, b.Id)
+            };
+        }
+
+        /// <summary>計算信任名單人數（解析 JSON 陣列；異常/空值回 0）。</summary>
+        private static int CountTrusted(string? json)
+        {
+            if (string.IsNullOrWhiteSpace(json)) return 0;
+            try
+            {
+                using var doc = JsonDocument.Parse(json);
+                return doc.RootElement.ValueKind == JsonValueKind.Array ? doc.RootElement.GetArrayLength() : 0;
+            }
+            catch { return 0; }
+        }
+
+        /// <summary>正規化 Discord User ID：抽出數字，需為 17~20 位 snowflake，否則回 null。</summary>
+        private static string? NormalizeDiscordId(string? raw)
+        {
+            if (string.IsNullOrWhiteSpace(raw)) return null;
+            var digits = new string(raw.Where(char.IsDigit).ToArray());
+            return digits.Length is >= 17 and <= 20 ? digits : null;
         }
 
         /// <summary>建立 Bot 綁定（LINE 平台必須提供 ChannelSecret，Token 由後端加密儲存）</summary>
@@ -163,6 +199,7 @@ namespace ReactL.api.Services.BotBindings
                 WebhookBaseUrl = string.IsNullOrWhiteSpace(request.WebhookBaseUrl) ? null : request.WebhookBaseUrl.Trim().TrimEnd('/'),
                 DiscordApplicationId = string.IsNullOrWhiteSpace(request.DiscordApplicationId) ? null : request.DiscordApplicationId.Trim(),
                 DiscordPublicKey = string.IsNullOrWhiteSpace(request.DiscordPublicKey) ? null : request.DiscordPublicKey.Trim()
+                // OwnerDiscordUserId 改由獨立端點 SetOwnerAsync 維護（與信任名單同一個後台 Modal）
             };
 
             // 建立後依平台驗證憑證（Discord 註冊 /chat；LINE 驗 /bot/info），結果一併持久化供前端標示
@@ -194,6 +231,7 @@ namespace ReactL.api.Services.BotBindings
             binding.WebhookBaseUrl = string.IsNullOrWhiteSpace(request.WebhookBaseUrl) ? null : request.WebhookBaseUrl.Trim().TrimEnd('/');
             binding.DiscordApplicationId = string.IsNullOrWhiteSpace(request.DiscordApplicationId) ? null : request.DiscordApplicationId.Trim();
             binding.DiscordPublicKey = string.IsNullOrWhiteSpace(request.DiscordPublicKey) ? null : request.DiscordPublicKey.Trim();
+            // OwnerDiscordUserId 不在此更新（避免編輯 Bot 時誤清主人）；改由 SetOwnerAsync 獨立維護
 
             // 編輯後重新驗證憑證（可能才補上 ApplicationId / 更換設定；更新不帶 Token，需從 DB 解密）
             var (valid, error) = await ValidateCredentialAsync(binding, _aes.Decrypt(binding.BotTokenEncrypted));
@@ -286,6 +324,68 @@ namespace ReactL.api.Services.BotBindings
                 TotalUsage = totalUsage,
                 Remaining = limit.HasValue ? Math.Max(0, limit.Value - totalUsage) : null
             };
+        }
+
+        // ── 信任系統（後台路徑）────────────────────────────────────────────────
+
+        /// <summary>取得某 Bot 的信任系統成員名單（先驗證 Bot 屬於該使用者）</summary>
+        public async Task<List<TrustedUserResponse>> GetTrustedUsersAsync(Guid id, Guid userId)
+        {
+            await EnsureOwnedAsync(id, userId);
+            var list = await _trust.GetListAsync(id);
+            return list.Select(ToTrustedResponse).ToList();
+        }
+
+        /// <summary>後台新增/更新信任系統成員（GrantedBy = "admin"；可指定系統角色，含設第一個主人）</summary>
+        public async Task<TrustedUserResponse> AddTrustedUserAsync(Guid id, Guid userId, AddTrustedUserRequest request)
+        {
+            await EnsureOwnedAsync(id, userId);
+
+            var did = NormalizeDiscordId(request.DiscordUserId) ?? request.DiscordUserId.Trim();
+            var user = new TrustedUser
+            {
+                Id = did,
+                Label = string.IsNullOrWhiteSpace(request.Label) ? did : request.Label.Trim(),
+                Tier = string.IsNullOrWhiteSpace(request.Tier) ? null : request.Tier.Trim(),
+                SystemRole = TrustRole.Normalize(request.SystemRole),
+                GrantedBy = "admin",
+                GrantedAt = DateTime.Now
+            };
+
+            var (_, saved) = await _trust.AddAsync(id, user);
+            if (saved is null)
+                throw new ValidationException(new Dictionary<string, string[]>
+                {
+                    ["trustedUsers"] = ["信任名單已達上限或無法新增"]
+                });
+
+            _logger.LogInformation("信任系統（後台）加入 BotBindingId={Bot} Target={Target} Role={Role} UserId={User}", id, did, saved.SystemRole, userId);
+            return ToTrustedResponse(saved);
+        }
+
+        /// <summary>後台移除信任對象</summary>
+        public async Task RemoveTrustedUserAsync(Guid id, Guid userId, string discordUserId)
+        {
+            await EnsureOwnedAsync(id, userId);
+            await _trust.RemoveAsync(id, discordUserId);
+            _logger.LogInformation("信任名單（後台）移除 BotBindingId={Bot} Target={Target} UserId={User}", id, discordUserId, userId);
+        }
+
+        private static TrustedUserResponse ToTrustedResponse(TrustedUser t) => new()
+        {
+            Id = t.Id,
+            Label = t.Label,
+            Tier = t.Tier,
+            SystemRole = TrustRole.Normalize(t.SystemRole),
+            GrantedBy = t.GrantedBy,
+            GrantedAt = t.GrantedAt
+        };
+
+        /// <summary>驗證 Bot 存在且屬於該使用者（不取實體，僅授權檢查）</summary>
+        private async Task EnsureOwnedAsync(Guid id, Guid userId)
+        {
+            var exists = await _db.BotBindings.AnyAsync(b => b.Id == id && b.UserId == userId);
+            if (!exists) throw new NotFoundException("BotBinding", id);
         }
 
         /// <summary>取得使用者有所有權的 BotBinding（已追蹤，可直接修改）</summary>

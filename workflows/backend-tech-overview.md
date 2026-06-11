@@ -467,6 +467,7 @@ LINE / Discord Bot 透過 Webhook 接收外部訊息，端點**不掛 `/api/v1` 
 - Discord 以 `DiscordCommandService` 呼叫 Discord API 自動註冊 Global `/chat` Slash Command；註冊結果寫入 `BotBindings.CredentialValid`（LINE 則以 `GET /v2/bot/info` 驗證 Channel Access Token），供後台標示無效 Bot。
 - 收到訊息 → 查 `BotBinding` + `Persona` → 以 **該 Bot 設定的模型**呼叫 AI（LINE 走 `CompleteWithUsageAsync(modelType: ...)`、Discord 走 `CompleteWithToolsAsync(modelType)`，皆以 Bot 擁有者解析金鑰）→ 寫入 `ExternalMessages` 與 `TokenUsageStats`。
 - AI 上游錯誤（429/401/逾時等）：兩者皆 `catch (UpstreamAiException)` → 直接回覆 `ex.Message`（友善訊息，含對應供應商名稱），與聊天室一致（詳見下方「AI 錯誤處理共通化」）。
+- **Discord 信任系統（V012）**：讓角色依發話者身分切換語氣。成員名單存 `BotBinding.TrustedUsersJson`（JSON，每筆含 `systemRole`＝`owner`/`trusted`，可多位 owner），讀寫單一來源 `BotTrustService`。維護路徑兩條——①後台 CRUD（`/bot-bindings/{id}/trusted-users`，App 登入授權，可設系統角色）②Discord 對話由現任主人要求、加入前跳二次確認（對話路徑一律加 `trusted`，不開放提權）。主人閘門在 **code 層**（`IsOwnerAsync`），非靠 prompt。`DiscordWebhookService.BuildTrustContextAsync` 把「身分事實」注入 system prompt、語氣交由角色設定本身（中性化，可套任意角色）。詳見 `discord-bot-function-calling-design.md` §12。
 
 ---
 

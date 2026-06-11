@@ -84,6 +84,15 @@ namespace ReactL.api.Models.BotBindings
         /// <remarks>bit · NULL</remarks>
         public bool? CredentialValid { get; set; }
 
+        /// <summary>
+        /// 信任系統成員名單，以 JSON 陣列儲存：
+        /// [{ "id", "label", "tier", "systemRole", "grantedBy", "grantedAt" }]。
+        /// systemRole=owner 的成員（可多人）才能維護名單；主人與信任者皆為此清單成員。
+        /// 兩條維護路徑共用此欄位（後台 CRUD / Discord 對話）。null 或空字串視為空名單。
+        /// </summary>
+        /// <remarks>nvarchar(max) · NULL</remarks>
+        public string? TrustedUsersJson { get; set; }
+
         // ── 導航屬性 ──────────────────────────────────────────────────────
         public User User { get; set; } = null!;
         public Persona? Persona { get; set; }

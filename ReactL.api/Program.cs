@@ -215,6 +215,7 @@ namespace ReactL.api
                 builder.Services.AddScoped<IPersonaService, PersonaService>();
                 builder.Services.AddScoped<IPromptTemplateService, PromptTemplateService>();
                 builder.Services.AddScoped<IBotBindingService, BotBindingService>();
+                builder.Services.AddScoped<IBotTrustService, BotTrustService>();
                 builder.Services.AddScoped<IConversationService, ConversationService>();
                 builder.Services.AddMemoryCache();   // Discord agent：發起節流 + 待確認批次暫存
                 builder.Services.AddScoped<IAiService, OpenAiService>();

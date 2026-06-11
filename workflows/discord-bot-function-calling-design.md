@@ -181,6 +181,15 @@ Task<AiToolResult> CompleteWithToolsAsync(systemPrompt, userPrompt, tools, owner
 |------|------|:--:|:--:|------|
 | HELP-01 | 查詢可用功能 / 使用說明 | ✅ | 否 | 語意如「你能幫我做什麼」「功能清單」「使用說明」「help」時，AI 呼叫此工具，後端回傳「目前開放的功能清單與用法」。唯讀、不碰 Discord 操作、免權限。**清單應由開放工具動態產生，新增工具時自動同步，避免說明與實作脫節。** |
 
+### TRUST — 信任系統（V012 新增，詳見 §12）
+> 為「角色依發話者身分切換語氣」而設（例：拿鐵的主人/爹地/朋友）。**這三個工具不在原 23 個工具的盤點內**，是後續擴充。權限不走 Discord 位元，而是 code 層的「主人閘門」（發話者是名單中 `systemRole==owner` 的成員，可多位主人）。
+
+| 代號 | 功能 | 給AI | 二次確認 | 說明 |
+|------|------|:--:|:--:|------|
+| TRUST-01 | `add_trusted_user` 加入信任對象 | ✅ | **是** | 僅主人可用；加入前跳〔執行/取消〕；對話路徑一律加為 `trusted` |
+| TRUST-02 | `remove_trusted_user` 移除信任對象 | ✅ | 否 | 僅主人可用；立即執行 |
+| TRUST-03 | `list_trusted_users` 列出信任名單（唯讀）| ✅ | 否 | 僅主人可查看 |
+
 ### 排除清單（討論後決定**不交給 AI**，列出以保留完整紀錄）
 | 代號 | 功能 | 權限 | 不納入原因 |
 |------|------|------|------|
@@ -299,3 +308,48 @@ Task<AiToolResult> CompleteWithToolsAsync(systemPrompt, userPrompt, tools, owner
   - 暱稱用 **「管理暱稱」** 非「更改暱稱」（後者只能改自己）。
   - **語音類動作（禁麥/禁聽/移動/中斷）不檢查身分組階級**；但**禁言/改暱稱/踢人/封鎖/身分組會檢查階級** → Bot 身分組必須**高於**對象，否則回 403（code 50013）。擁有者永遠無法被動作。
 - 每次 `/chat` 會送出全部工具 schema（約 3000+ token），是額度消耗主因；必要時可精簡工具描述以省 token。
+
+---
+
+## 12. 信任系統 — 2026-06-11
+
+> 為 Discord 角色「**依發話者身分切換語氣**」而設。**信任系統只提供身分事實，語氣交給角色設定本身**——
+> 故可套用於任意角色（拿鐵對主人撒嬌、客服 Bot 對 VIP 親切，皆由各自的角色 prompt 決定）。
+> 名單可在 Bot 運行期間動態增減。
+
+### 12.1 統一成員模型（含「系統角色」）
+- **主人與信任者都是同一份名單的成員**，差別在每筆的 `SystemRole`：`owner`（主人/管理者，可維護名單，**可多位**）、`trusted`（信任者）。
+- `Tier`（關係）是**自訂情感標籤**（主人/爹地/朋友/老闆…），只給角色語氣參考，**與權限脫鉤**。
+- 不再有單一 `OwnerDiscordUserId` 欄位——「誰是主人」由名單中 `SystemRole==owner` 的成員決定。
+
+### 12.2 為何存在 BotBinding，而非 Persona
+信任名單是「**這隻 Bot 實例**」的狀態，不是角色模板的屬性：
+- `Persona ↔ BotBinding` 為**一對多**，且同一 Persona 還會被前台公開聊天、後台對話共用。
+- 掛在 Persona 會跨 Bot／跨前台**互相污染**，且每次增減污染 Persona 版本史。
+- 故存於 `BotBinding.TrustedUsersJson`（JSON 陣列，V012）。
+
+### 12.3 資料與服務
+- `TrustedUser`（POCO）：`{ Id, Label, Tier, SystemRole, GrantedBy, GrantedAt }`，序列化進 `TrustedUsersJson`。`TrustRole`（常數 + `Normalize`）統一系統角色值。
+- `BotTrustService`（Scoped，注入 `AppDbContext`）：**JSON 讀寫的單一來源**，`GetListAsync / AddAsync / RemoveAsync / FindAsync / IsOwnerAsync`，含去重與名單上限（100）。Discord 工具與後台 CRUD **共用**。
+
+### 12.4 兩條維護路徑
+| 路徑 | 入口 | 授權 | 確認 |
+|------|------|------|------|
+| ①後台 | Bot 卡片人形圖示 →「信任系統」Modal：新增成員時可選系統角色（含設第一位主人）| App 登入 + Bot 擁有者（`BotBinding.UserId`）| 否（後台本身即授權）|
+| ②Discord 對話 | 現任主人在 `/chat` 說「信任他」→ AI 呼叫 `add_trusted_user` | **主人閘門**（見 12.5）| **是**（加入前跳按鈕）|
+
+> 後台 API：`GET/POST/DELETE /bot-bindings/{id}/trusted-users`（POST 帶 `systemRole`，相同 ID 視為更新）。**沒有獨立的主人端點**——主人就是 `systemRole=owner` 的成員。
+> **雞生蛋**：名單初始為空 → 無主人 → 對話路徑無法操作；**第一位主人必須由後台（App 登入授權）指定**。之後後台恆可維護，Discord 則由現任主人操作。
+
+### 12.5 主人閘門（安全核心，code 層）
+- `add/remove/list_trusted_user` 執行前呼叫 `CheckOwnerAsync(ctx)` → `BotTrustService.IsOwnerAsync(botId, invokerId)`：發話者須為名單中 `SystemRole==owner` 的成員，否則拒絕。
+- **絕不靠 prompt 把關**；任何人自稱主人、或非主人要求信任某人，皆被 code 擋下。
+- **對話路徑加入者一律為 `trusted`**：不開放用聊天把人提權為主人（避免被話術提權）；要設主人只能在後台。
+- 路徑②的二次確認另一層意義：AI 是「**推測**主人想信任誰」，按鈕讓主人確認 AI 的解讀後才落地。`DiscordToolContext` 帶 `BotBindingId`（owner 與否改由名單查詢，不再放 ctx）。
+
+### 12.6 語氣切換（prompt 注入，中性化）
+每次 `/chat` 由 `DiscordWebhookService.BuildTrustContextAsync` 讀名單、判斷發話者身分（主人/管理者、信任者+關係、一般使用者），注入 system prompt。**只陳述身分事實 + 名單 + 維護規則，明言「語氣請依你的角色設定」**，不寫死任何人設（拿鐵的軟萌撒嬌寫在牠自己的角色 prompt 裡，照樣生效；換角色也能用）。名單為空時不附加。
+
+### 12.7 與既有機制的複用
+- 二次確認沿用 §7 的 `BuildConfirmationAsync` + 按鈕 + `ExecuteConfirmedAsync`（custom_id `cf:trustadd:<token>`，待確認資料以 `IMemoryCache` 暫存，避免中文 label 塞進長度受限的 custom_id）。
+- `add_trusted_user` 的 `RequiredPermission=0`：`BuildConfirmationAsync` 的通用權限檢查改為「`RequiredPermission != 0` 時才套用 Discord 權限」，0 權限工具改由各自的 code 閘門把關。

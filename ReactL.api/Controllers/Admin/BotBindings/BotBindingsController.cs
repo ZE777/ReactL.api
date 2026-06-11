@@ -43,6 +43,7 @@ namespace ReactL.api.Controllers.Admin.BotBindings
                 WebhookBaseUrl = d.WebhookBaseUrl,
                 DiscordApplicationId = d.DiscordApplicationId,
                 DiscordPublicKey = d.DiscordPublicKey,
+                TrustedUserCount = d.TrustedUserCount,
                 CredentialValid = d.CredentialValid,
                 CreatedAt = d.CreatedAt,
                 UpdatedAt = d.UpdatedAt
@@ -108,6 +109,33 @@ namespace ReactL.api.Controllers.Admin.BotBindings
             return Ok(ApiResponse<LineQuotaResponse>.Ok(result));
         }
 
+        /// <summary>取得 Bot 的信任系統成員名單</summary>
+        [HttpGet("{id:guid}/trusted-users")]
+        [ProducesResponseType(typeof(ApiResponse<List<TrustedUserResponse>>), 200)]
+        public async Task<IActionResult> GetTrustedUsers(Guid id)
+        {
+            var result = await _service.GetTrustedUsersAsync(id, User.GetUserId());
+            return Ok(ApiResponse<List<TrustedUserResponse>>.Ok(result));
+        }
+
+        /// <summary>新增一位信任對象</summary>
+        [HttpPost("{id:guid}/trusted-users")]
+        [ProducesResponseType(typeof(ApiResponse<TrustedUserResponse>), 200)]
+        public async Task<IActionResult> AddTrustedUser(Guid id, [FromBody] AddTrustedUserRequest request)
+        {
+            var result = await _service.AddTrustedUserAsync(id, User.GetUserId(), request);
+            return Ok(ApiResponse<TrustedUserResponse>.Ok(result, "已加入信任名單"));
+        }
+
+        /// <summary>移除一位信任對象</summary>
+        [HttpDelete("{id:guid}/trusted-users/{discordUserId}")]
+        [ProducesResponseType(typeof(ApiResponse<object>), 200)]
+        public async Task<IActionResult> RemoveTrustedUser(Guid id, string discordUserId)
+        {
+            await _service.RemoveTrustedUserAsync(id, User.GetUserId(), discordUserId);
+            return Ok(ApiResponse<object>.Ok(null!, "已移出信任名單"));
+        }
+
         // ── 私有輔助方法 ──────────────────────────────────────────────────────
 
         /// <summary>將 BotBinding Domain 轉換為詳情 Response DTO</summary>
@@ -126,6 +154,7 @@ namespace ReactL.api.Controllers.Admin.BotBindings
                 WebhookBaseUrl = d.WebhookBaseUrl,
                 DiscordApplicationId = d.DiscordApplicationId,
                 DiscordPublicKey = d.DiscordPublicKey,
+                TrustedUserCount = d.TrustedUserCount,
                 CredentialValid = d.CredentialValid,
                 CredentialError = d.CredentialError,
                 CreatedAt = d.CreatedAt,
